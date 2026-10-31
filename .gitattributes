@@ -1,0 +1,5 @@
+# 统一 LF：脚本与 Go 源码在 Windows 上也不出 CRLF 噪音
+* text=auto
+*.go text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
