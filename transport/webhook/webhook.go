@@ -147,7 +147,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if env.Op == 13 {
-		h.handleChallenge(w, env.D)
+		h.handleChallenge(w, r, env.D)
 		return
 	}
 	if env.Op != 0 {
@@ -200,7 +200,7 @@ func (h *Handler) verify(sigHex, timestamp string, body []byte) error {
 	if err != nil {
 		return fmt.Errorf("webhook: timestamp 非法: %w", err)
 	}
-	if delta := h.now().Sub(time.Unix(ts, 0)); delta > h.opts.Window || delta < -h.opts.Window {
+	if !h.withinWindow(ts) {
 		return fmt.Errorf("webhook: timestamp 超出 ±%s 窗口", h.opts.Window)
 	}
 	msg := make([]byte, 0, len(timestamp)+len(body))
@@ -212,8 +212,55 @@ func (h *Handler) verify(sigHex, timestamp string, body []byte) error {
 	return nil
 }
 
+// withinWindow 判断 unix 秒是否落在 ±Window 内。
+//
+// ⚠️ op0 验签与 op13 挑战【必须共用这一份判断】：两处各写一遍的话，
+// 改窗口时漏改一处，就会出现"挑战能签、事件收不下"或反之的诡异状态。
+func (h *Handler) withinWindow(ts int64) bool {
+	delta := h.now().Sub(time.Unix(ts, 0))
+	return delta <= h.opts.Window && delta >= -h.opts.Window
+}
+
+// isPlainToken 校验 op13 的 plain_token 是否为官方形态（32 位十六进制）。
+//
+// ⚠️ 这不是格式洁癖，是【安全边界】：op0 的验签内容是 timestamp+body，
+// 而 op13 会对 event_ts+plain_token 无条件出签名。若不限 token 形态，
+// 攻击者把任意事件体塞进 plain_token 就能拿到它的合法签名（签名预言机），
+// 再以同一个 event_ts 作 X-Signature-Timestamp、该 token 作 body 发 op0，
+// 验签必然通过 ⇒ 可伪造任意入站事件（例如 GroupDelRobot 解绑告警群）。
+// 把被签名的内容锁死在"纯数字时间戳 + 32 位 hex"之后，它不可能构成 JSON 事件信封。
+//
+// 大小写都放行：官方下发的是小写 hex，放宽大小写不削弱安全性，
+// 但能避免官方某天改大小写直接把回调打死。
+func isPlainToken(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // handleChallenge 处理 op13 URL 校验：签名内容 = event_ts + plain_token。
-func (h *Handler) handleChallenge(w http.ResponseWriter, d json.RawMessage) {
+//
+// ⚠️ 这是全流程里唯一"不验签就给签名"的入口，因此把入参卡到最窄形态：
+// 时间戳必须是数字且在窗口内、plain_token 必须是 32 位 hex（见 isPlainToken）。
+// 任何一项不合法都直接 400，绝不产出签名。
+func (h *Handler) handleChallenge(w http.ResponseWriter, r *http.Request, d json.RawMessage) {
+	// appid 校验与 op0 同口径：只在配置了期望值且请求带了头时比对。
+	if h.opts.AppID != "" {
+		if got := r.Header.Get(AppIDHeader); got != "" && got != h.opts.AppID {
+			h.log.Warn("op13 appid 不匹配", "got", got)
+			http.Error(w, "appid mismatch", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	var payload struct {
 		PlainToken string `json:"plain_token"`
 		EventTS    string `json:"event_ts"`
@@ -222,15 +269,34 @@ func (h *Handler) handleChallenge(w http.ResponseWriter, d json.RawMessage) {
 		http.Error(w, "bad challenge payload", http.StatusBadRequest)
 		return
 	}
-	if payload.PlainToken == "" || payload.EventTS == "" {
-		http.Error(w, "op13 缺少 plain_token 或 event_ts", http.StatusBadRequest)
+	if !isPlainToken(payload.PlainToken) {
+		h.rejectChallenge(w, "plain_token 不是 32 位 hex")
 		return
 	}
+	ts, err := strconv.ParseInt(payload.EventTS, 10, 64)
+	if err != nil {
+		h.rejectChallenge(w, "event_ts 缺失或非数字")
+		return
+	}
+	if !h.withinWindow(ts) {
+		h.rejectChallenge(w, fmt.Sprintf("event_ts 超出 ±%s 窗口", h.opts.Window))
+		return
+	}
+
 	sig := ed25519.Sign(h.key, []byte(payload.EventTS+payload.PlainToken))
 	writeJSON(w, http.StatusOK, map[string]string{
 		"plain_token": payload.PlainToken,
 		"signature":   hex.EncodeToString(sig),
 	})
+}
+
+// rejectChallenge 统一拒绝 op13。
+//
+// ⚠️ 响应只给通用原因、日志只记失败原因短语，【不回显 plain_token / event_ts】：
+// body 上限 1MB，回显等于让任何人把任意载荷写进日志。
+func (h *Handler) rejectChallenge(w http.ResponseWriter, reason string) {
+	h.log.Warn("op13 挑战被拒绝", "reason", reason)
+	http.Error(w, "invalid challenge", http.StatusBadRequest)
 }
 
 // dispatch 入队异步解析并回调事件；队列满时丢弃并计数（ACK 已发出，平台不会重推）。

@@ -68,9 +68,13 @@ func signedRequest(t *testing.T, key ed25519.PrivateKey, body []byte) *http.Requ
 
 func TestChallenge(t *testing.T) {
 	h, key, _ := newHandler(t, Options{})
-	body := []byte(`{"op":13,"d":{"plain_token":"pt-1","event_ts":"1700000000"}}`)
+	// ⚠️ 必须用官方形态的入参（32 位 hex + 当前时间）：op13 已收紧为
+	//    "数字时间戳 + 32 位 hex"，用 pt-1 / 过期时间会被 400 拒掉（见下方校验用例）。
+	tok := strings.Repeat("a1", 16)
+	tsStr := strconv.FormatInt(time.Now().Unix(), 10)
+	body := challengeBody(tok, tsStr)
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/aichat/webhook", strings.NewReader(string(body))))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/aichat/webhook", bytes.NewReader(body)))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
@@ -83,8 +87,126 @@ func TestChallenge(t *testing.T) {
 		t.Fatalf("bad challenge: %v", err)
 	}
 	sig, _ := hex.DecodeString(resp.Signature)
-	if !ed25519.Verify(key.Public().(ed25519.PublicKey), []byte("1700000000pt-1"), sig) {
+	if !ed25519.Verify(key.Public().(ed25519.PublicKey), []byte(tsStr+tok), sig) {
 		t.Fatal("challenge signature invalid")
+	}
+}
+
+// challengeBody 造 op13 请求体。
+func challengeBody(token, ts string) []byte {
+	b, _ := json.Marshal(map[string]any{
+		"op": 13,
+		"d":  map[string]string{"plain_token": token, "event_ts": ts},
+	})
+	return b
+}
+
+// serve 用给定 body/头跑一次请求。
+func serve(h *Handler, body []byte, headers map[string]string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/aichat/webhook", bytes.NewReader(body))
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestChallengeInputValidation 覆盖 op13 的输入校验（B-02 验收项）：
+// 只有"32 位 hex + 数字时间戳 + 窗口内"才出签名。
+func TestChallengeInputValidation(t *testing.T) {
+	now := strconv.FormatInt(time.Now().Unix(), 10)
+	stale := strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10)
+	tok := strings.Repeat("a1", 16)
+
+	cases := []struct {
+		name  string
+		token string
+		ts    string
+		want  int
+	}{
+		{"合法 32 位 hex + 当前时间", tok, now, http.StatusOK},
+		{"大写 hex 放行", strings.Repeat("A1", 16), now, http.StatusOK},
+		{"非 hex（旧用例的 pt-1）", "pt-1", now, http.StatusBadRequest},
+		{"超长 64 位 hex", strings.Repeat("ab", 32), now, http.StatusBadRequest},
+		{"含非 hex 字符", strings.Repeat("z1", 16), now, http.StatusBadRequest},
+		{"event_ts 非数字", tok, "abc", http.StatusBadRequest},
+		{"event_ts 缺失", tok, "", http.StatusBadRequest},
+		{"event_ts 超窗", tok, stale, http.StatusBadRequest},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h, _, _ := newHandler(t, Options{})
+			rec := serve(h, challengeBody(c.token, c.ts), nil)
+			if rec.Code != c.want {
+				t.Fatalf("status = %d, want %d, body = %s", rec.Code, c.want, rec.Body.String())
+			}
+			if c.want != http.StatusOK && strings.Contains(rec.Body.String(), "signature") {
+				t.Fatalf("被拒的挑战不应返回签名: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestChallengeAppIDMismatch 校验 op13 的 appid 头与 op0 同口径。
+func TestChallengeAppIDMismatch(t *testing.T) {
+	h, _, _ := newHandler(t, Options{AppID: "app-1"})
+	tok := strings.Repeat("a1", 16)
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+
+	rec := serve(h, challengeBody(tok, ts), map[string]string{AppIDHeader: "other"})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("appid 不匹配 status = %d, want 401", rec.Code)
+	}
+	rec = serve(h, challengeBody(tok, ts), map[string]string{AppIDHeader: "app-1"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("appid 匹配 status = %d, want 200, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOp13ReplayAttackRejected 复现审计里的签名预言机攻击（B-02）：
+// 攻击链是 ① op13 把"想伪造的事件体"当 plain_token 骗出签名 → ② 以同一 event_ts 作
+// 时间戳、该 token 作 body 发 op0，验签必过。修复后第 ① 步就断了。
+//
+// 同时验证：即便拿一个【合法】挑战签名去重放 op0，也必须 401——
+// 因为被签名的是 ts+32hex，而 op0 验的是 ts+body，body 只要不是那 32 位 hex 就不匹配。
+func TestOp13ReplayAttackRejected(t *testing.T) {
+	h, _, events := newHandler(t, Options{})
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	forged := []byte(`{"id":"EV-EVIL","op":0,"t":"GROUP_DEL_ROBOT","d":{"group_openid":"g1"}}`)
+
+	// ① 把事件体当 plain_token 送进 op13：必须 400 且不产出签名。
+	rec := serve(h, challengeBody(string(forged), ts), nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("伪造 token 的挑战 status = %d, want 400（签名预言机未堵住）", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "signature") {
+		t.Fatalf("被拒的挑战返回了签名: %s", rec.Body.String())
+	}
+
+	// ② 用【合法】挑战拿到的签名去重放 op0：必须 401 且不派发事件。
+	tok := strings.Repeat("a1", 16)
+	rec = serve(h, challengeBody(tok, ts), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("合法挑战 status = %d, want 200", rec.Code)
+	}
+	var resp struct {
+		Signature string `json:"signature"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad challenge resp: %v", err)
+	}
+	rec = serve(h, forged, map[string]string{
+		SignatureHeader: resp.Signature,
+		TimestampHeader: ts,
+	})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("挑战签名重放 status = %d, want 401", rec.Code)
+	}
+	select {
+	case ev := <-events:
+		t.Fatalf("伪造事件被派发: %+v", ev)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
