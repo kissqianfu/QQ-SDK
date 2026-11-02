@@ -41,6 +41,15 @@ func (c *Client) Send(ctx context.Context, target Target, msg *send.Message) (*R
 	if err != nil {
 		return nil, err
 	}
+	// 主动消息过本地三层配额；被动回复（带 msg_id / event_id）直接放行。
+	//
+	// ⚠️ 位置刻意放在 Token() 之前：本地配额拒绝时连 token 都不必刷新，
+	//    绝不触达平台——否则"本地限流是为了省平台额度"这句话就不成立。
+	if isActiveMessage(msg) {
+		if err := c.quota.acquire(target.Scene, target.ID); err != nil {
+			return nil, err
+		}
+	}
 	tok, err := c.Token(ctx)
 	if err != nil {
 		return nil, err
@@ -50,6 +59,20 @@ func (c *Client) Send(ctx context.Context, target Target, msg *send.Message) (*R
 		return nil, err
 	}
 	return parseSendResult(raw)
+}
+
+// isActiveMessage 判断是否为主动消息：既没有 msg_id 也没有 event_id 锚点。
+//
+// ⚠️ 判定必须与平台口径一致：带锚点的回复属于"被动回复"，不占主动额度，
+// 一旦误判会把所有回复都算进去，额度瞬间被日常对话吃光。
+func isActiveMessage(msg *send.Message) bool {
+	if id, _ := msg.Reply(); id != "" {
+		return false
+	}
+	if id, _ := msg.ReplyEvent(); id != "" {
+		return false
+	}
+	return true
 }
 
 // Me 拉取机器人自身信息（GET /users/@me）；启动时调用，失败应拒绝启动。

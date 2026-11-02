@@ -9,6 +9,7 @@ QQ 官方机器人接入层 SDK（Go）：零业务依赖、可整体拆卸替�
 - 事件：平台语义的 `event.Event`（无业务字段）
 - 错误：`apierr.APIError` 判定方法（`IsDuplicate` / `IsExpired` / `IsAuth` / `IsRateLimited`）
 - 稳健性内置：WS 心跳判活（读空闲超时自动重连）、指数退避（稳定连接断线后重置）、429 `Retry-After`、ctx 取消即停重试
+- 发送前**主动配额**内置（三层：群聊 60 QPM / 单聊 10 QPS / 单关系 20 QPM + 每目标每日 1000 条），本地拒绝时不触达平台
 
 ## 安装
 
@@ -105,6 +106,37 @@ _, _ = c.Sender().Send(ctx, target, send.Markdown(reply).ReplyTo(ev.MsgID, 1))
 // 被动回复：event_id 锚点
 _, _ = c.Sender().Send(ctx, target, send.Markdown(reply).ReplyToEvent(ev.ID, 1))
 ```
+
+## 出站主动消息配额（三层）
+
+`Client.Send` 是所有发送形态的唯一出口，配额就实现在这里，**宿主不需要也不应该再自己计数**：
+
+| 层级 | 维度 | 默认值 |
+|---|---|---|
+| ① 全局 · 群聊 | 全部群消息共用一条桶 | 60 QPM |
+| ① 全局 · 单聊 | 全部单聊消息共用一条桶（与群聊互相独立） | 10 QPS |
+| ② 单关系 | 按 `group_openid` / `user_openid` | 20 QPM |
+| ③ 日上限 | 每目标每天（日界 UTC+8 00:00，只查不消耗） | 1000 条 |
+
+```go
+// 默认即开启，按上表口径；要调就传 Quota：
+c, _ := api.New(api.Config{
+    AppID: appID, AppSecret: appSecret,
+    Quota: &api.QuotaConfig{GroupQPM: 60, SingleQPS: 10, RelationQPM: 20, DailyPerTarget: 1000},
+})
+// 需要整体关闭时：Quota: &api.QuotaConfig{Disable: true}
+```
+
+- **被动回复不计入**：带 `msg_id`（`ReplyTo`）或 `event_id`（`ReplyToEvent`）的消息直接放行。
+- **被本地拒绝时不会调用平台**：判定发生在取 token/发请求之前，这才真的省额度。
+- **错误可区分**：`errors.Is(err, apierr.ErrThrottledLocal)` 为真；`errors.As(err, &te)` 可取
+  `te.Layer`（`group`/`single`/`relation`/`daily`）与 `te.RetryAfter`。
+  它和平台 429（`APIError.IsRateLimited()`）**不是一类**：本地拒绝重试无意义，应走兜底通道；
+  平台 429 才值得等 `Retry-After`。
+- **指标**：`c.QuotaStats()` 返回三层各自的拒绝次数，宿主可导出
+  `xxx_throttled_total{layer}`。
+- ⚠️ **best-effort**：计数在内存里，重启即重置，多实例之间不共享。它是告警风暴时的自保，
+  **不是权威额度**——权威口径永远是平台返回的 429。
 
 ## 富媒体上传
 
@@ -207,6 +239,9 @@ ev.Elements // []event.MessageElement：msg_elements（message_type=103 引用�
 
 ```go
 _, err := c.Sender().Send(ctx, target, msg)
+if errors.Is(err, apierr.ErrThrottledLocal) {
+    // 本地主动配额拒绝：没调用平台、重试无意义 → 走兜底通道（如邮件）
+}
 var apiErr *qqbot.APIError
 if errors.As(err, &apiErr) {
     switch {

@@ -47,6 +47,10 @@ type Config struct {
 	TokenURL string
 	// Sleep 可注入（测试用）；nil 用真实时间且等待 ctx 感知。
 	Sleep func(time.Duration)
+
+	// Quota 是出站主动消息三层配额；nil 表示用默认口径（群 60 QPM / 单聊 10 QPS /
+	// 单关系 20 QPM / 每目标每日 1000 条）。QuotaConfig.Disable 可整体关闭。
+	Quota *QuotaConfig
 }
 
 // Client 是 QQ 开放平台 REST 客户端。
@@ -60,6 +64,7 @@ type Client struct {
 	tokens   token.Store
 	log      *slog.Logger
 	sleepCtx func(ctx context.Context, d time.Duration) error
+	quota    *quota // nil = 配额关闭（Config.Quota.Disable 或未构造）
 
 	mu sync.Mutex // 串行刷新 token（单进程，不需要分布式锁）
 }
@@ -99,5 +104,11 @@ func New(cfg Config) (*Client, error) {
 	} else {
 		c.sleepCtx = waitCtx
 	}
+	// 配额默认开启：不显式指定就按官方口径兜底，宿主"忘了配"也不至于裸奔。
+	// 关闭要显式写 Quota: &api.QuotaConfig{Disable: true}。
+	if cfg.Quota == nil {
+		cfg.Quota = &QuotaConfig{}
+	}
+	c.quota = newQuota(cfg.Quota)
 	return c, nil
 }

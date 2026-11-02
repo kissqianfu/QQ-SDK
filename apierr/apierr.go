@@ -1,7 +1,11 @@
 // Package apierr 定义 QQ 开放平台的 API 错误与判定方法，根包与 api 包共用这一份。
 package apierr
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
 
 // APIError 是平台返回的错误（HTTP 非 2xx 或业务错误码）。
 //
@@ -44,3 +48,29 @@ func (e *APIError) IsAuth() bool {
 func (e *APIError) IsRateLimited() bool {
 	return e.Code == 40034100 || e.Code == 50002 || e.HTTP == 429
 }
+
+// ErrThrottledLocal 表示【本地主动配额】拒绝：这条消息没有发出去，
+// 也【没有调用平台】（调用前就在本地拦掉了，否则配额就没有省额度的意义）。
+//
+// ⚠️ 必须与平台 429（APIError.IsRateLimited）分得开，两者的处置完全不同：
+//   - 本地拒绝：重试没有意义（额度是自己算出来的），应直接走兜底通道（如邮件）；
+//   - 平台 429：说明本地配额口径与平台不一致，等 Retry-After 重试有意义。
+var ErrThrottledLocal = errors.New("qqbot: 本地主动配额已满")
+
+// ThrottleError 是本地主动配额拒绝的详细错误：Layer 供宿主导出分标签指标，
+// RetryAfter 是该层预计多久后腾出额度（日上限为 0，表示要等下一个日界）。
+type ThrottleError struct {
+	Layer      string // group / single / relation / daily
+	RetryAfter time.Duration
+}
+
+// Error 实现 error。
+func (e *ThrottleError) Error() string {
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf("qqbot: 本地主动配额已满 layer=%s retry_after=%s", e.Layer, e.RetryAfter)
+	}
+	return fmt.Sprintf("qqbot: 本地主动配额已满 layer=%s", e.Layer)
+}
+
+// Is 让 errors.Is(err, ErrThrottledLocal) 成立，业务不必记住具体类型。
+func (e *ThrottleError) Is(target error) bool { return target == ErrThrottledLocal }
