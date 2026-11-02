@@ -118,6 +118,14 @@ _, _ = c.Sender().Send(ctx, target, send.Markdown(reply).ReplyToEvent(ev.ID, 1))
 | ② 单关系 | 按 `group_openid` / `user_openid` | 20 QPM |
 | ③ 日上限 | 每目标每天（日界 UTC+8 00:00，只查不消耗） | 1000 条 |
 
+> **升级注意（v0.1.0 → v0.2.0）**：配额是 v0.2.0 新增的，且**默认开启**——升级后宿主的
+> `api.Config{}` 一行不改，主动消息也会开始被本地限流。对大多数宿主这是"白得一层保护"，
+> 但两种情况请先自查：① 已有自己的发送队列/限流，想保留单一权威口径 → 显式 `Disable`；
+> ② 存在批量主动推送（整点提醒、群发）→ 按实际峰值调 `GroupQPM`/`SingleQPS`，否则超出部分会
+> 收到 `ErrThrottledLocal`。另外错误处理里若有 `errors.As(err, &apierr.APIError)`，
+> `ThrottleError` **不会**命中它（两者是不同错误类型），需要单独 `errors.Is/As` 判断，
+> 否则日志里只留一行字符串、看不到 `layer`。
+
 ```go
 // 默认即开启，按上表口径；要调就传 Quota：
 c, _ := api.New(api.Config{
