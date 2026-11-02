@@ -307,3 +307,9 @@ func TestTransportResume(t *testing.T) {
 		t.Fatal("Run did not exit")
 	}
 }
+
+func TestDefaultGatewayEndpoint(t *testing.T) {
+	if DefaultGatewayEndpoint != "https://api.bot.qq.com/gateway" {
+		t.Fatalf("DefaultGatewayEndpoint = %q, want https://api.bot.qq.com/gateway", DefaultGatewayEndpoint)
+	}
+}

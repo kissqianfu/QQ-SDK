@@ -26,9 +26,9 @@ import (
 )
 
 const (
-	// ProdBaseURL 是正式环境 REST 地址（官方"接入指南"口径）。
-	// 新文档另有统一地址 https://api.bot.qq.com，两者并存均可；沙箱为 sandbox.api.sgroup.qq.com（Config.BaseURL 覆盖）。
-	ProdBaseURL = "https://api.sgroup.qq.com"
+	// ProdBaseURL 是正式环境 REST 地址（2026-08 起官方统一域名）。
+	// 旧地址 https://api.sgroup.qq.com 仍可用，可通过 Config.BaseURL 覆盖；沙箱为 sandbox.api.sgroup.qq.com。
+	ProdBaseURL = "https://api.bot.qq.com"
 	// AuthURL 是换取 access_token 的地址（注意不是 API 域名；bots.qq.com 与 api.bot.qq.com 均官方在列）。
 	AuthURL = "https://bots.qq.com/app/getAppAccessToken"
 )

@@ -629,3 +629,9 @@ func TestUploadFileDataBase64(t *testing.T) {
 		t.Fatal("UploadFileData(>5M) error = nil, want error")
 	}
 }
+
+func TestDefaultBaseURL(t *testing.T) {
+	if ProdBaseURL != "https://api.bot.qq.com" {
+		t.Fatalf("ProdBaseURL = %q, want https://api.bot.qq.com", ProdBaseURL)
+	}
+}

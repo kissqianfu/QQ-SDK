@@ -10,12 +10,14 @@
 - **富媒体**：`msg_type=7` 发送体自动补 `content:" "`（官方要求该字段有值）
 - **图文卡片**：`tuwen.content` 字段由 `desc` 改为官方 `description`
 - **主动消息 seq**：`send.Message` 新增 `Seq(n)` / `SeqNo()`；主动消息可携带递增 `msg_seq`，避免平台按 seq + 内容判重
+- **默认域名**：`api.ProdBaseURL` / `ws.DefaultGatewayEndpoint` 改为官方统一域名 `https://api.bot.qq.com`（旧域名仍可通过配置覆盖）
 
 ### 接入方影响
 
 - 向后兼容；Webhook 调用方无需再自行展开 secret
 - 主动消息建议改为 `send.Markdown(md).Seq(nextSeq())`；被动回复仍用 `ReplyTo`/`ReplyToEvent`
 - 卡片/媒体无需改调用方式，SDK 发送体已修正
+- 依赖旧默认域名的接入方如遇问题，显式设置 `BaseURL` / `GatewayEndpoint` 即可
 
 ## 未发版（HEAD `a545b09`，2026-10-31）— 建议发 v0.2.0
 

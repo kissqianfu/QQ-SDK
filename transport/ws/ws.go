@@ -21,9 +21,9 @@ import (
 )
 
 const (
-	// DefaultGatewayEndpoint 是获取 wss 地址的 HTTP 端点（官方接入指南口径；
-	// 新文档的统一域名 https://api.bot.qq.com/gateway 同样可用，GatewayEndpoint 可覆盖）。
-	DefaultGatewayEndpoint = "https://api.sgroup.qq.com/gateway"
+	// DefaultGatewayEndpoint 是获取 wss 地址的 HTTP 端点（2026-08 起官方统一域名；
+	// 旧地址 https://api.sgroup.qq.com/gateway 仍可用，GatewayEndpoint 可覆盖）。
+	DefaultGatewayEndpoint = "https://api.bot.qq.com/gateway"
 	// userAgent 统一 UA。
 	userAgent = "qqbot-sdk/1.0"
 	// defaultHeartbeat 是 Hello 没给间隔时的兜底（30s）。
