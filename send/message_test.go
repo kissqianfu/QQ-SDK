@@ -34,6 +34,19 @@ func TestReplyAndReference(t *testing.T) {
 	}
 }
 
+func TestSeqForActive(t *testing.T) {
+	m := Text("hi").Seq(3)
+	if m.SeqNo() != 3 {
+		t.Fatalf("SeqNo() = %d, want 3", m.SeqNo())
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("Validate(active seq) error = %v", err)
+	}
+	if err := Text("hi").Seq(-1).Validate(); err == nil {
+		t.Fatal("Validate(negative seq) = nil, want error")
+	}
+}
+
 func TestCardValidation(t *testing.T) {
 	valid := Card{
 		Title:       "标题",

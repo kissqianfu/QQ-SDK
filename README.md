@@ -1,4 +1,4 @@
-﻿# QQ-SDK
+# QQ-SDK
 
 QQ 官方机器人接入层 SDK（Go）：零业务依赖、可整体拆卸替换。
 
@@ -65,7 +65,7 @@ SDK 只提供 `http.Handler`，端口/TLS/反代由业务决定：
 
 ```go
 h, _ := webhook.New(webhook.Options{
-    Secret: appSecret,       // Ed25519 seed（官方协议）
+    Secret: appSecret,       // AppSecret（SDK 内部按官方协议 repeat 到 32 字节）
     AppID:  appID,           // 可选：校验 X-Bot-Appid
     OnEvent: func(ctx context.Context, ev *event.Event) { /* 异步处理 */ },
     // Deduper: 自选，重复事件只 ACK 不回调
@@ -89,6 +89,21 @@ for ev := range c.Events() {
             send.Text("收到").ReplyToEvent(ev.ID, 1))
     }
 }
+```
+
+## 发送消息
+
+```go
+target := api.Target{Scene: event.SceneGroup, ID: groupOpenID}
+
+// 主动 Markdown；主动消息建议设置递增 msg_seq（平台按 seq + 内容去重）
+_, _ = c.Sender().Send(ctx, target, send.Markdown(md).Seq(nextSeq()))
+
+// 被动回复：msg_id 锚点
+_, _ = c.Sender().Send(ctx, target, send.Markdown(reply).ReplyTo(ev.MsgID, 1))
+
+// 被动回复：event_id 锚点
+_, _ = c.Sender().Send(ctx, target, send.Markdown(reply).ReplyToEvent(ev.ID, 1))
 ```
 
 ## 富媒体上传

@@ -493,11 +493,62 @@ func TestSendCardBody(t *testing.T) {
 		t.Fatalf("card = %+v", cardBody)
 	}
 	content := cardBody["content"].(map[string]any)
-	if content["title"] != "标题" || content["url"] != "https://e.com/a" {
+	if content["title"] != "标题" || content["url"] != "https://e.com/a" || content["description"] != "描述" {
 		t.Fatalf("card content = %+v", content)
 	}
 	if gotBody["content"] != nil {
 		t.Fatalf("msg_type=8 时不应有 content 字段: %+v", gotBody)
+	}
+}
+
+func TestSendMediaBody(t *testing.T) {
+	var gotBody map[string]any
+	srv := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app/getAppAccessToken":
+			writeJSON(w, 200, `{"access_token":"tok","expires_in":7200}`)
+		case "/v2/groups/g1/messages":
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			writeJSON(w, 200, `{"id":"m10"}`)
+		}
+	})
+	c := newClient(t, srv, token.NewMemory())
+
+	if _, err := c.Send(context.Background(), Target{Scene: event.SceneGroup, ID: "g1"}, send.Media("file-1")); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if gotBody["msg_type"].(float64) != 7 {
+		t.Fatalf("msg_type = %v, want 7", gotBody["msg_type"])
+	}
+	if gotBody["content"] != " " {
+		t.Fatalf("msg_type=7 时 content 必须为空格: %+v", gotBody)
+	}
+	if media := gotBody["media"].(map[string]any); media["file_info"] != "file-1" {
+		t.Fatalf("media = %+v", media)
+	}
+}
+
+func TestSendActiveMsgSeq(t *testing.T) {
+	var gotBody map[string]any
+	srv := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app/getAppAccessToken":
+			writeJSON(w, 200, `{"access_token":"tok","expires_in":7200}`)
+		case "/v2/groups/g1/messages":
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			writeJSON(w, 200, `{"id":"m11"}`)
+		}
+	})
+	c := newClient(t, srv, token.NewMemory())
+
+	if _, err := c.Send(context.Background(), Target{Scene: event.SceneGroup, ID: "g1"}, send.Markdown("hi").Seq(7)); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if gotBody["msg_seq"].(float64) != 7 {
+		t.Fatalf("主动消息 msg_seq = %v, want 7: %+v", gotBody["msg_seq"], gotBody)
+	}
+	if gotBody["msg_id"] != nil || gotBody["event_id"] != nil {
+		t.Fatalf("主动消息不应带锚点: %+v", gotBody)
 	}
 }
 

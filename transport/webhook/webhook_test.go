@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
@@ -29,9 +30,28 @@ func newHandler(t *testing.T, opts Options) (*Handler, ed25519.PrivateKey, <-cha
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	seed := make([]byte, ed25519.SeedSize)
-	copy(seed, []byte(testSecret))
-	return h, ed25519.NewKeyFromSeed(seed), ch
+	return h, testPrivateKey(), ch
+}
+
+// testPrivateKey 按官方协议把 testSecret repeat 到 32 字节，独立于 SDK 实现。
+func testPrivateKey() ed25519.PrivateKey {
+	seed := make([]byte, 0, ed25519.SeedSize)
+	for len(seed) < ed25519.SeedSize {
+		seed = append(seed, testSecret...)
+	}
+	return ed25519.NewKeyFromSeed(seed[:ed25519.SeedSize])
+}
+
+// TestSeedRepeat 验证短 secret 不是零填充，而是按官方协议重复到 32 字节。
+func TestSeedRepeat(t *testing.T) {
+	h, err := New(Options{Secret: testSecret})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	want := testPrivateKey().Public().(ed25519.PublicKey)
+	if !bytes.Equal(h.PublicKey(), want) {
+		t.Fatalf("PublicKey 不一致：seed 未按官方协议 repeat")
+	}
 }
 
 // signedRequest 造带合法签名的 POST 请求。

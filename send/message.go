@@ -164,6 +164,18 @@ func (m *Message) ReplyToEvent(eventID string, seq int) *Message {
 	return m
 }
 
+// Seq 设置主动消息的 msg_seq（不设置被动回复锚点）。
+//
+// 平台按 msg_id + msg_seq 去重；主动消息没有 msg_id，但相同内容连续发送时仍建议
+// 使用递增 seq，避免平台按 seq + 内容判定重复。被动回复请用 ReplyTo/ReplyToEvent。
+func (m *Message) Seq(seq int) *Message {
+	m.seq = seq
+	return m
+}
+
+// SeqNo 返回当前 msg_seq（0 表示未设置）。
+func (m *Message) SeqNo() int { return m.seq }
+
 // Kind 返回内容类型。
 func (m *Message) Kind() Kind { return m.kind }
 
@@ -202,6 +214,9 @@ func (m *Message) Validate() error {
 	// 被动回复锚点：msg_id 与 event_id 二选一，seq 必须从 1 开始。
 	if m.replyID != "" && m.replyEv != "" {
 		return errors.New("send: msg_id 与 event_id 锚点只能二选一")
+	}
+	if m.seq < 0 {
+		return fmt.Errorf("send: msg_seq 不能为负数（当前 %d）", m.seq)
 	}
 	if (m.replyID != "" || m.replyEv != "") && m.seq < 1 {
 		return fmt.Errorf("send: msg_seq 必须从 1 开始单调递增（当前 %d）", m.seq)

@@ -52,7 +52,7 @@ type EventMeta struct {
 
 // Options 是 webhook Handler 参数。
 type Options struct {
-	Secret  string // AppSecret（Ed25519 seed）
+	Secret  string // AppSecret（内部按官方协议 repeat 到 32 字节作为 Ed25519 seed）
 	AppID   string // 可选：校验 X-Bot-Appid
 	Window  time.Duration
 	MaxBody int64
@@ -75,6 +75,17 @@ type Handler struct {
 	dropped atomic.Int64
 }
 
+// seedFromSecret 按官方协议把 Bot Secret repeat 到 32 字节，作为 Ed25519 seed。
+//
+// 官方要求：secret 不足 32 字节时重复拼接（不是零填充），否则签名的公私钥与平台不一致。
+func seedFromSecret(secret string) []byte {
+	seed := make([]byte, 0, ed25519.SeedSize)
+	for len(seed) < ed25519.SeedSize {
+		seed = append(seed, secret...)
+	}
+	return seed[:ed25519.SeedSize]
+}
+
 // New 构造 Handler（内部启动 maxWorkers 个常驻 worker 消费派发队列）。
 func New(opts Options) (*Handler, error) {
 	if opts.Secret == "" {
@@ -89,8 +100,7 @@ func New(opts Options) (*Handler, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	seed := make([]byte, ed25519.SeedSize)
-	copy(seed, []byte(opts.Secret))
+	seed := seedFromSecret(opts.Secret)
 	h := &Handler{
 		opts:  opts,
 		key:   ed25519.NewKeyFromSeed(seed),

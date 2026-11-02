@@ -2,6 +2,21 @@
 
 对接入方（aichat 等主项目）：每次升级先看「接入方影响」小节；格式参考 Keep a Changelog。
 
+## 未发版（2026-11-02）— 协议兼容修复
+
+### 修复
+
+- **Webhook seed**：`webhook.New` 对 Bot Secret 由 `copy` 零填充改为按官方协议 repeat 到 32 字节；修复短 secret 下 `op=13` 挑战/事件验签失败
+- **富媒体**：`msg_type=7` 发送体自动补 `content:" "`（官方要求该字段有值）
+- **图文卡片**：`tuwen.content` 字段由 `desc` 改为官方 `description`
+- **主动消息 seq**：`send.Message` 新增 `Seq(n)` / `SeqNo()`；主动消息可携带递增 `msg_seq`，避免平台按 seq + 内容判重
+
+### 接入方影响
+
+- 向后兼容；Webhook 调用方无需再自行展开 secret
+- 主动消息建议改为 `send.Markdown(md).Seq(nextSeq())`；被动回复仍用 `ReplyTo`/`ReplyToEvent`
+- 卡片/媒体无需改调用方式，SDK 发送体已修正
+
 ## 未发版（HEAD `a545b09`，2026-10-31）— 建议发 v0.2.0
 
 ### 新增

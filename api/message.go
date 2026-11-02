@@ -109,6 +109,8 @@ func buildSendBody(msg *send.Message) (map[string]any, error) {
 		}
 	case send.KindMedia:
 		body["media"] = map[string]string{"file_info": msg.MediaFileInfo()}
+		// 官方要求 msg_type=7 时 content 有值（可为空格），否则部分场景会被平台拒绝。
+		body["content"] = " "
 	case send.KindCard:
 		// msg_type=8 时必须传独立 card 字段（官方 MessageCard：type=tuwen + content）。
 		body["card"] = cardPayload(msg.CardData())
@@ -120,6 +122,9 @@ func buildSendBody(msg *send.Message) (map[string]any, error) {
 		body["msg_seq"] = seq
 	} else if evID, seq := msg.ReplyEvent(); evID != "" {
 		body["event_id"] = evID
+		body["msg_seq"] = seq
+	} else if seq := msg.SeqNo(); seq > 0 {
+		// 主动消息也带 msg_seq：避免平台按 seq + 内容把重复内容判重。
 		body["msg_seq"] = seq
 	}
 	if ref := msg.ReferenceIdx(); ref != "" {
@@ -153,10 +158,10 @@ func cardPayload(c send.Card) map[string]any {
 	return map[string]any{
 		"type": "tuwen",
 		"content": map[string]string{
-			"title":   c.Title,
-			"desc":    c.Description,
-			"url":     c.URL,
-			"pic_url": c.PicURL,
+			"title":       c.Title,
+			"description": c.Description,
+			"url":         c.URL,
+			"pic_url":     c.PicURL,
 		},
 	}
 }
