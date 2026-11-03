@@ -53,7 +53,7 @@ func Parse(raw []byte) (*Event, error) {
 	switch ev.Type {
 	case InteractionCreate:
 		// 官方注明 interaction_id 不带 "INTERACTION_CREATE:" 前缀；历史事件出现过带前缀形态，防御性剥掉。
-		ev.EventID = firstNonEmpty(strings.TrimPrefix(d.ID, "INTERACTION_CREATE:"), env.ID)
+		ev.EventID = qqtypes.FirstNonEmpty(strings.TrimPrefix(d.ID, "INTERACTION_CREATE:"), env.ID)
 		ev.InteractionType = d.InteractionType
 		if s := sceneFromString(d.sceneString()); s != 0 {
 			ev.Scene = s
@@ -61,19 +61,19 @@ func Parse(raw []byte) (*Event, error) {
 		ev.GroupMemberOpenID = d.GroupMemberOID
 		if d.Data != nil && d.Data.Resolved != nil {
 			ev.Interaction = d.Data.Resolved.model()
-			ev.InteractionUserID = firstNonEmpty(d.Data.Resolved.UserID, d.GroupMemberOID, d.UserOpenID)
+			ev.InteractionUserID = qqtypes.FirstNonEmpty(d.Data.Resolved.UserID, d.GroupMemberOID, d.UserOpenID)
 		} else {
-			ev.InteractionUserID = firstNonEmpty(d.GroupMemberOID, d.UserOpenID)
+			ev.InteractionUserID = qqtypes.FirstNonEmpty(d.GroupMemberOID, d.UserOpenID)
 		}
 	case GroupAddRobot:
-		ev.EventID = firstNonEmpty(d.ID, env.ID)
+		ev.EventID = qqtypes.FirstNonEmpty(d.ID, env.ID)
 	case GroupMsgReceive:
-		ev.EventID = firstNonEmpty(d.ID, env.ID)
+		ev.EventID = qqtypes.FirstNonEmpty(d.ID, env.ID)
 	case C2CMsgReceive, FriendAdd:
 		// 单聊场景官方支持 event_id 回复的事件是 INTERACTION_CREATE / C2C_MSG_RECEIVE /
 		// FRIEND_ADD（群聊是 INTERACTION_CREATE / GROUP_ADD_ROBOT / GROUP_MSG_RECEIVE）。
 		// 都取"事件最外层的 id"；d.id 只是防御性兜底。
-		ev.EventID = firstNonEmpty(d.ID, env.ID)
+		ev.EventID = qqtypes.FirstNonEmpty(d.ID, env.ID)
 	}
 
 	ev.TargetID = d.targetID(ev.Scene)
@@ -89,7 +89,7 @@ func Parse(raw []byte) (*Event, error) {
 	// GROUP_MEMBER_ADD/REMOVE / GROUP_JOIN_REQUEST 的成员 openid 在 d.member_openid。
 	// INTERACTION_CREATE 没有 author：群场景在 d.group_member_openid，单聊在 d.user_openid。
 	if ev.Sender.ID == "" {
-		ev.Sender.ID = firstNonEmpty(d.OpenID, d.MemberOpenID, d.GroupMemberOID, d.UserOpenID)
+		ev.Sender.ID = qqtypes.FirstNonEmpty(d.OpenID, d.MemberOpenID, d.GroupMemberOID, d.UserOpenID)
 	}
 	if ev.TargetID == "" && ev.Scene == SceneC2C {
 		ev.TargetID = d.OpenID
@@ -123,16 +123,6 @@ func Parse(raw []byte) (*Event, error) {
 		ev.SubscribeResults = d.subscribeResults()
 	}
 	return ev, nil
-}
-
-// firstNonEmpty 返回第一个非空字符串。
-func firstNonEmpty(ss ...string) string {
-	for _, s := range ss {
-		if s != "" {
-			return s
-		}
-	}
-	return ""
 }
 
 // dispatchData 是 d 字段的并集（不同事件类型字段不同，缺的字段自然为零值）。

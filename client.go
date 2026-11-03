@@ -8,6 +8,7 @@ import (
 	"github.com/kissqianfu/QQ-SDK/api"
 	"github.com/kissqianfu/QQ-SDK/event"
 	"github.com/kissqianfu/QQ-SDK/qqtypes"
+	"github.com/kissqianfu/QQ-SDK/transport/webhook"
 )
 
 const (
@@ -21,15 +22,21 @@ type Client struct {
 	api    *api.Client
 	events chan *event.Event
 	done   chan struct{} // Run 退出（或从未 Run 就 Close）时关闭
+	// wh 是 webhook 模式的回调处理器；其余模式为 nil（见 ingress.go）。
+	wh *webhook.Handler
+	// stop 在收尾时先于 events 关闭：让在途投递（pushEvent/wsEmit）立即返回，
+	// 避免 send-on-closed 或"关 events 时还有发送者"。
+	stop chan struct{}
 
 	mu        sync.Mutex
 	cancel    context.CancelFunc
 	running   bool
 	closed    bool
 	closeOnce sync.Once // done/events 只能关一次：Run 收尾与 Close 并发时防双重 close panic
+	stopOnce  sync.Once // stop 只能关一次
 }
 
-// New 只校验配置并构造 REST 客户端，不建立任何连接（方便测试构造）。
+// New 只校验配置并构造 REST 客户端（按需装配内置通道），不建立连接（方便测试构造）。
 func New(cfg Config) (*Client, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -51,63 +58,82 @@ func New(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{cfg: cfg, api: apiClient, events: make(chan *event.Event, eventBuffer), done: make(chan struct{})}, nil
+	c := &Client{
+		cfg:    cfg,
+		api:    apiClient,
+		events: make(chan *event.Event, eventBuffer),
+		done:   make(chan struct{}),
+		stop:   make(chan struct{}),
+	}
+	if err := c.buildIngress(); err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 // Run 阻塞运行接入通道，把事件写入 Events()；ctx 取消后优雅退出并关闭事件通道。
 //
 // 同一 Client 只允许 Run 一次：重复调用返回错误（SDK 内部管理重连/心跳，外部不用管）。
+//
+// ws 模式：委托给 transport.Run（心跳/重连/Resume 在内）；
+// webhook 模式：等 ctx 取消（或 Close）后停收并收尾，事件由 WebhookHTTPHandler 推入 Events()。
 func (c *Client) Run(ctx context.Context) error {
-	if c.cfg.Transport == nil {
-		// 没有接入通道时 Run 立即返回；同时关闭事件通道，保证 range Events() 的消费者
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if c.cfg.Transport == nil && c.wh == nil {
+		// 没有接入通道时 Run 立即失败；同时关闭事件通道，保证 range Events() 的消费者
 		// 不会被永久阻塞（与"Run 返回后 SDK 负责关闭 Events"的注释一致）。
 		c.mu.Lock()
 		c.closed = true
 		c.mu.Unlock()
-		c.closeOnce.Do(func() {
-			close(c.done)
-			close(c.events)
-		})
-		return errors.New("qqbot: Transport 未配置，无法 Run")
+		c.finalize()
+		return errors.New("qqbot: 接入通道未配置（Config.Mode 或 Config.Transport），无法 Run")
 	}
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 
+	runCtx, cancel, ok, err := c.beginRun(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil // Close 已发生：事件通道已关闭，直接退出
+	}
+	defer cancel()
+	defer c.endRun()
+
+	if c.wh != nil {
+		return c.runWebhook(runCtx)
+	}
+	return c.cfg.Transport.Run(runCtx, c.wsEmit(runCtx))
+}
+
+// beginRun 做"只允许一次 Run"的登记；ok=false 表示 Client 已关闭（Run 应静默返回）。
+func (c *Client) beginRun(parent context.Context) (runCtx context.Context, cancel context.CancelFunc, ok bool, err error) {
+	runCtx, cancel = context.WithCancel(parent)
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.closed {
-		c.mu.Unlock()
-		return nil // Close 已把事件通道关闭，直接退出（不重复 close）
+		cancel()
+		return nil, nil, false, nil
 	}
 	if c.running {
-		c.mu.Unlock()
-		return errors.New("qqbot: Run 已在运行，不能重复调用")
+		cancel()
+		return nil, nil, false, errors.New("qqbot: Run 已在运行，不能重复调用")
 	}
 	c.running = true
 	c.cancel = cancel
+	return runCtx, cancel, true, nil
+}
+
+// endRun 是 Run 的收尾：置位 closed 并执行统一 finalize。
+func (c *Client) endRun() {
+	c.mu.Lock()
+	c.running = false
+	// 必须置 closed：Run 收尾时已 close(events)，若之后再次 Run，
+	// transport 往 events 写会 panic: send on closed channel。
+	c.closed = true
 	c.mu.Unlock()
-
-	defer func() {
-		c.mu.Lock()
-		c.running = false
-		// 必须置 closed：Run 收尾时已 close(events)，若之后再次 Run，
-		// transport 往 events 写会 panic: send on closed channel。
-		// 置位后第二次 Run 在入口直接返回 nil（与"Close 后 Run"同一语义）。
-		c.closed = true
-		c.mu.Unlock()
-		c.closeOnce.Do(func() {
-			close(c.done)
-			close(c.events)
-		})
-	}()
-
-	return c.cfg.Transport.Run(runCtx, func(ev *event.Event) error {
-		select {
-		case c.events <- ev:
-			return nil
-		case <-runCtx.Done():
-			return runCtx.Err()
-		}
-	})
+	c.finalize()
 }
 
 // Events 返回只读事件通道；Run 返回后（或 Close 后从未 Run）SDK 负责关闭，业务只 range。
@@ -128,21 +154,17 @@ func (c *Client) Close() error {
 		return nil
 	}
 	c.closed = true
-	if c.cancel != nil {
-		c.cancel()
-	}
+	cancel := c.cancel
 	running := c.running
-	if !running {
-		c.closeOnce.Do(func() {
-			close(c.done)
-			close(c.events)
-		})
-	}
-	done := c.done
 	c.mu.Unlock()
 
-	if running {
-		<-done // 等 Run 的 defer 关闭事件通道，避免消费者读半截
+	if cancel != nil {
+		cancel()
 	}
+	if running {
+		<-c.done // 等 Run 的 defer 执行完 finalize（含 webhook handler 收尾）
+		return nil
+	}
+	c.finalize()
 	return nil
 }

@@ -76,7 +76,7 @@ func (c *Client) GroupInfo(ctx context.Context, groupOpenID string) (*GroupInfo,
 		return nil, fmt.Errorf("api: group_openid 不能为空")
 	}
 	var out GroupInfo
-	if err := c.getJSON(ctx, "/v2/groups/"+url.PathEscape(groupOpenID)+"/info", nil, &out); err != nil {
+	if err := c.getJSON(ctx, groupPath(groupOpenID, "/info"), nil, &out); err != nil {
 		return nil, fmt.Errorf("api: group info %s: %w", groupOpenID, err)
 	}
 	return &out, nil
@@ -88,7 +88,7 @@ func (c *Client) GroupBotState(ctx context.Context, groupOpenID string) (*GroupB
 		return nil, fmt.Errorf("api: group_openid 不能为空")
 	}
 	var out GroupBotState
-	if err := c.getJSON(ctx, "/v2/groups/"+url.PathEscape(groupOpenID)+"/bot_state", nil, &out); err != nil {
+	if err := c.getJSON(ctx, groupPath(groupOpenID, "/bot_state"), nil, &out); err != nil {
 		return nil, fmt.Errorf("api: group bot state %s: %w", groupOpenID, err)
 	}
 	return &out, nil
@@ -100,7 +100,7 @@ func (c *Client) GroupRestrictSetting(ctx context.Context, groupOpenID string) (
 		return nil, fmt.Errorf("api: group_openid 不能为空")
 	}
 	var out GroupRestrictSetting
-	if err := c.getJSON(ctx, "/v2/groups/"+url.PathEscape(groupOpenID)+"/restrict_chat_setting", nil, &out); err != nil {
+	if err := c.getJSON(ctx, groupPath(groupOpenID, "/restrict_chat_setting"), nil, &out); err != nil {
 		return nil, fmt.Errorf("api: group restrict setting %s: %w", groupOpenID, err)
 	}
 	return &out, nil

@@ -188,36 +188,22 @@ func (c *Client) UploadMaterial(ctx context.Context, fileName, contentType strin
 
 // ListMaterials 查询有效素材图片（GET /v2/media-images?cursor=...），按上传时间倒序。
 func (c *Client) ListMaterials(ctx context.Context, cursor string) (*MaterialList, error) {
-	q := url.Values{}
-	if cursor != "" {
-		q.Set("cursor", cursor)
-	}
 	var out MaterialList
-	if err := c.getJSON(ctx, materialPrefix, q, &out); err != nil {
+	if err := c.getJSON(ctx, materialPrefix, pageQuery(cursor, 0, 0), &out); err != nil {
 		return nil, fmt.Errorf("api: list materials: %w", err)
 	}
 	return &out, nil
 }
 
-// ListMaterialsAll 自动翻页拉取全部素材（护栏 100 页）。
+// ListMaterialsAll 自动翻页拉取全部素材（护栏见 paging.go）。
 func (c *Client) ListMaterialsAll(ctx context.Context) ([]MaterialImage, error) {
-	var all []MaterialImage
-	cursor := ""
-	for page := 0; page < 100; page++ {
+	return paginate(func(cursor string) ([]MaterialImage, string, error) {
 		res, err := c.ListMaterials(ctx, cursor)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		all = append(all, res.Images...)
-		if res.NextCursor == "" {
-			return all, nil
-		}
-		if res.NextCursor == cursor {
-			return nil, fmt.Errorf("api: list materials: 游标不前进 %q", cursor)
-		}
-		cursor = res.NextCursor
-	}
-	return nil, fmt.Errorf("api: list materials: 超过最大页数")
+		return res.Images, res.NextCursor, nil
+	})
 }
 
 // DeleteMaterial 删除素材图片并释放配额（DELETE /v2/media-images/{image_id}/delete）。

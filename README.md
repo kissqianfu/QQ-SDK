@@ -2,7 +2,7 @@
 
 QQ 官方机器人接入层 SDK（Go）：零业务依赖、可整体拆卸替换。
 
-- 接入：WebSocket + Webhook 双通道（`Transport` 接口，SDK 不替业务起 server）
+- 接入：WebSocket + Webhook 双通道；可一行 `Config.Mode` 用内置装配，也可自备 `Transport`（SDK 不替业务起 server）
 - REST：access_token 刷新（提前 90s、互斥、401 自动换票重试一次）、群/单聊发消息、撤回、`Me`（`GET /users/@me`）、富媒体上传、**素材管理**（`qqbot-media://`）、互动事件响应（`PUT /interactions/{id}`）、**分享链接**
 - 消息：文本 / 原生 Markdown / **Markdown 模板**（`custom_template_id`+params，官方已标废弃）/ 富媒体 / 图文卡片 / **输入中状态（msg_type=6）** / **互动召回（is_wakeup）**；键盘支持自定义与**模板短形式**（`{"keyboard":{"id":...}}`）；被动回复锚点支持 `msg_id` 与 `event_id` 二选一
 - 协议正确性内置：`send.Message` 构造器做本地校验（卡片 title≤50 / url 必须 https / 键盘行列上限等）
@@ -20,7 +20,37 @@ QQ 官方机器人接入层 SDK（Go）：零业务依赖、可整体拆卸替�
 go get github.com/kissqianfu/QQ-SDK
 ```
 
-## WebSocket 接入（推荐）
+## 内置接入通道（Mode）
+
+不想自己拼 `ws.New` / `webhook.New` 时，给 `Config.Mode` 一行即可；两种通道的事件统一从 `Events()` 取：
+
+```go
+c, _ := qqbot.New(qqbot.Config{
+    AppID: appID, AppSecret: appSecret, Logger: log,
+    Mode: qqbot.ModeWS, // 或 qqbot.ModeWebhook
+})
+
+go func() {
+    for ev := range c.Events() { /* 业务处理 */ }
+}()
+go c.Run(ctx) // 两种模式一致：阻塞到 ctx 取消 / Close
+
+// 仅 webhook 模式：把回调处理器挂到业务路由（SDK 不替业务起 server）
+if h := c.WebhookHTTPHandler(); h != nil {
+    mux.Handle("/callback", h)
+}
+```
+
+- **ModeWS**：心跳/重连/Resume 内置；可用 `WSOptions` 调 intents 等。AppID/Token/Logger 由门面回填
+  （Token 复用 REST 缓存），默认注入内存 `SessionStore`（不注入则断线窗口事件会丢）。
+- **ModeWebhook**：Secret/AppID/Logger 为空时由门面回填；`WebhookOptions.OnEvent` **禁止自行设置**
+  （事件统一走 `Events()`，New 会报错）。
+- **与 `Transport` 互斥**；`Mode` 为空时行为与旧版完全一致（宿主自备 Transport）。
+- 纯 REST 场景建议直接用 `api.New`：门面会 import ws/webhook 包，二进制会多链接这部分代码。
+
+> 命名说明：`Mode` 指"接入方式"；本 SDK 语境里的"频道（channel）"专指 QQ 频道域，不在支持范围。
+
+## WebSocket 接入（手工装配）
 
 ```go
 import (

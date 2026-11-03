@@ -1,5 +1,14 @@
 # 提案：门面内置双通道接入（ws / webhook）
 
+> **实施状态（2026-11-03，v0.3.2）**：已按**方案 B** 落地。与本文原文的差异以实现为准：
+> 1. 字段名 `Channel` → **`Mode`**（`ModeWS`/`ModeWebhook`）——本 SDK 的 "channel" 专指 QQ 频道域；
+> 2. webhook **不**包装成 `Transport`：Handler 的 `OnEvent` 直接投递 `Events()`，`Run` 只等取消，
+>    避免原文"先 h.Close 再排水"在满载时的三方死锁；
+> 3. 收尾顺序固化为 **关闭 stop → 关闭 handler（等 worker）→ 关闭 done/events**；
+> 4. `WebhookHTTPHandler()` 返回 `*webhook.Handler`（可直接当 `http.Handler` 用，另可拿丢弃统计）；
+> 5. `OnEvent` 由门面独占，宿主自行设置会在 `New` 报错（原文是"会被覆盖"）。
+> 用法与边界见 README「内置接入通道（Mode）」与 CHANGELOG v0.3.2；本文保留作设计背景。
+
 > 来源：AlertBot 接入实践。目标：宿主不再自己拼 `ws.New` / `webhook.New`，
 > 一个 `Config.Channel` 就能完成接入通道选择，事件统一走 `Events()`。
 > **零值完全兼容现状，非 BREAKING**；以下均为建议，取舍权在 SDK 维护者。

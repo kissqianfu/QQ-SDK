@@ -57,6 +57,19 @@ func ParseTime(raw json.RawMessage) time.Time {
 	return unixGuess(int64(f))
 }
 
+// FirstNonEmpty 返回第一个非空字符串；全空返回 ""。
+//
+// 跨包公共小工具（event 的字段兜底链、门面的通道参数回填都用它）——
+// 放在本包是为了避免同一逻辑在多个包里各写一份、行为慢慢漂移。
+func FirstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // unixGuess 按阈值猜秒或毫秒。
 func unixGuess(n int64) time.Time {
 	if n > timeMilliThreshold {

@@ -8,7 +8,7 @@
 //
 // # 模块地图（包依赖只允许向下，禁止横向回环）
 //
-//	qqbot（门面）     Config / Run / Events / Close，组装 api + transport
+//	qqbot（门面）     Config / Mode（内置 ws|webhook 装配，见 ingress.go）/ Run / Events / Close
 //	├─ transport      接入通道契约（Transport 接口）
 //	│  ├─ transport/ws       WebSocket 接入（心跳/重连/Resume）
 //	│  └─ transport/webhook  Webhook 接入（Ed25519 验签/队列派发）

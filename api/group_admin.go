@@ -62,10 +62,7 @@ func (c *Client) ListGroupMembers(ctx context.Context, groupOpenID, cursor strin
 	if groupOpenID == "" {
 		return nil, fmt.Errorf("api: group_openid 不能为空")
 	}
-	q := url.Values{}
-	if cursor != "" {
-		q.Set("cursor", cursor)
-	}
+	q := pageQuery(cursor, 0, 0)
 	var out GroupMemberList
 	if err := c.getJSON(ctx, groupPath(groupOpenID, "/members"), q, &out); err != nil {
 		return nil, fmt.Errorf("api: list group members %s: %w", groupOpenID, err)
@@ -73,25 +70,15 @@ func (c *Client) ListGroupMembers(ctx context.Context, groupOpenID, cursor strin
 	return &out, nil
 }
 
-// ListGroupMembersAll 自动翻页拉取全部群成员（护栏 100 页防游标不前进）。
+// ListGroupMembersAll 自动翻页拉取全部群成员（护栏见 paging.go）。
 func (c *Client) ListGroupMembersAll(ctx context.Context, groupOpenID string) ([]GroupMember, error) {
-	var all []GroupMember
-	cursor := ""
-	for page := 0; page < 100; page++ {
+	return paginate(func(cursor string) ([]GroupMember, string, error) {
 		res, err := c.ListGroupMembers(ctx, groupOpenID, cursor)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		all = append(all, res.Members...)
-		if res.NextCursor == "" {
-			return all, nil
-		}
-		if res.NextCursor == cursor {
-			return nil, fmt.Errorf("api: list group members: 游标不前进 %q", cursor)
-		}
-		cursor = res.NextCursor
-	}
-	return nil, fmt.Errorf("api: list group members: 超过最大页数")
+		return res.Members, res.NextCursor, nil
+	})
 }
 
 // GroupMemberInfo 查询单个群成员详情（GET .../members/{member_openid}，30 QPM，内邀）。
@@ -170,16 +157,7 @@ func (c *Client) ListMemberBlacklist(ctx context.Context, groupOpenID, cursor st
 	if limit < 0 {
 		return nil, fmt.Errorf("api: limit 不能为负数")
 	}
-	if limit > 100 {
-		limit = 100
-	}
-	q := url.Values{}
-	if cursor != "" {
-		q.Set("cursor", cursor)
-	}
-	if limit > 0 {
-		q.Set("limit", fmt.Sprintf("%d", limit))
-	}
+	q := pageQuery(cursor, limit, 100)
 	var out MemberBlacklist
 	if err := c.getJSON(ctx, groupPath(groupOpenID, "/member_blacklist"), q, &out); err != nil {
 		return nil, fmt.Errorf("api: list member blacklist: %w", err)
@@ -330,16 +308,7 @@ func (c *Client) JoinRequestList(ctx context.Context, groupOpenID, cursor string
 	if limit < 0 {
 		return nil, fmt.Errorf("api: limit 不能为负数")
 	}
-	if limit > 50 {
-		limit = 50
-	}
-	q := url.Values{}
-	if cursor != "" {
-		q.Set("cursor", cursor)
-	}
-	if limit > 0 {
-		q.Set("limit", fmt.Sprintf("%d", limit))
-	}
+	q := pageQuery(cursor, limit, 50)
 	var out JoinRequestList
 	if err := c.getJSON(ctx, groupPath(groupOpenID, "/join_request_list"), q, &out); err != nil {
 		return nil, fmt.Errorf("api: join request list: %w", err)

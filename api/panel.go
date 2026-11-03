@@ -112,13 +112,8 @@ func (c *Client) ListPanels(ctx context.Context, scope, cursor string, limit int
 	if scope == "" {
 		return nil, fmt.Errorf("api: scope 不能为空")
 	}
-	q := url.Values{"scope": {scope}}
-	if cursor != "" {
-		q.Set("cursor", cursor)
-	}
-	if limit > 0 {
-		q.Set("limit", fmt.Sprintf("%d", limit))
-	}
+	q := pageQuery(cursor, limit, 50)
+	q.Set("scope", scope)
 	var out PanelList
 	if err := c.getJSON(ctx, "/v2/panels", q, &out); err != nil {
 		return nil, fmt.Errorf("api: list panels: %w", err)
@@ -127,25 +122,19 @@ func (c *Client) ListPanels(ctx context.Context, scope, cursor string, limit int
 }
 
 // ListPanelsAll 拉取指定场景下的全部面板（自动翻页）。一个机器人最多 20 个面板，
-// 通常一页拿完；maxPages 护栏只防服务端游标异常导致的死循环。
+// 通常一页拿完；页数/游标护栏见 paging.go。
 func (c *Client) ListPanelsAll(ctx context.Context, scope string) ([]PanelRecord, error) {
-	var all []PanelRecord
-	cursor := ""
-	for page := 0; page < 100; page++ {
+	return paginate(func(cursor string) ([]PanelRecord, string, error) {
 		p, err := c.ListPanels(ctx, scope, cursor, 50)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		all = append(all, p.Records...)
-		if p.IsEnd || p.NextCursor == "" {
-			return all, nil
+		next := p.NextCursor
+		if p.IsEnd {
+			next = ""
 		}
-		if p.NextCursor == cursor {
-			return nil, fmt.Errorf("api: list panels: 游标不前进 %q", cursor)
-		}
-		cursor = p.NextCursor
-	}
-	return nil, fmt.Errorf("api: list panels: 超过最大页数")
+		return p.Records, next, nil
+	})
 }
 
 // CreatePanel 创建指令面板（10 QPM，一个机器人最多 20 个面板），返回新面板 ID。

@@ -3,9 +3,13 @@ package transport
 
 import (
 	"context"
+	"errors"
 
 	"github.com/kissqianfu/QQ-SDK/event"
 )
+
+// ErrClosed 表示接入通道已关闭：emit 在收尾阶段返回它，transport 应停止而不是继续投递。
+var ErrClosed = errors.New("transport: 通道已关闭")
 
 // Shard 是分片信息；单机器人固定 {0,1}，保留字段仅为协议完整。
 type Shard struct {
