@@ -15,6 +15,15 @@ type Store interface {
 	Set(ctx context.Context, token string, ttl time.Duration) error
 }
 
+// Deleter 是可选接口：支持主动失效的实现（如 Redis）应实现它。
+//
+// 平台可能提前吊销 access_token（轮换 AppSecret、重置凭证等），此时请求会 401，
+// 但 token 缓存要等到 TTL 才过期——没有失效能力就一直 401 到过期。
+// api 层在收到 401 时会按需调用本接口并重试一次；只实现 Store 的旧实现不受影响。
+type Deleter interface {
+	Delete(ctx context.Context) error
+}
+
 // Memory 是线程安全的内存 TokenStore。
 type Memory struct {
 	mu     sync.RWMutex
@@ -48,5 +57,17 @@ func (m *Memory) Set(ctx context.Context, tok string, ttl time.Duration) error {
 	defer m.mu.Unlock()
 	m.token = tok
 	m.expire = m.now().Add(ttl)
+	return nil
+}
+
+// Delete 主动失效缓存（实现 Deleter）：下次 Token() 会重新刷新。
+func (m *Memory) Delete(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.token = ""
+	m.expire = time.Time{}
 	return nil
 }

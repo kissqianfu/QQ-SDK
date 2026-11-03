@@ -2,6 +2,59 @@
 
 对接入方（aichat 等主项目）：每次升级先看「接入方影响」小节；格式参考 Keep a Changelog。
 
+## 未发版（2026-11-03）— 对照 api-v2 文档的审计修复（建议发 v0.3.0）
+
+### 修复（P0）
+
+- **错误体字段是 `err_code`，不是 `code`**：官方《API 调用指南》明确失败体为 `{"err_code":...,"message":...,"trace_id":...}` 且要求按 `err_code` 判断。`api/http.go` 原先只读 `code` → `apierr.APIError.Code` 恒为 0，`IsDuplicate/IsExpired/IsAuth/IsRateLimited` 在生产里全部静默失效。现 err_code 优先、code 兜底
+- **Webhook op13 的 `plain_token` 强校验过窄**：官方回调验证示例的 token 是 20 位字母数字（`Arq0D5A61EgUu4OxUvOp`），原先要求"32 位 hex"会把平台自己的挑战全部 400 拒掉 → 回调地址永远验证不通过。现放宽为 8~64 位字母数字；签名预言机仍被堵住（JSON 事件体必然含 `{ } " :`，过不了该口径）
+- **撤回消息（此前宣称有、实际无）**：新增 `api.Client.Recall`（`DELETE /v2/{groups|users}/{openid}/messages/{message_id}`，发送后 2 分钟内）
+- **单聊 `event_id` 被动回复锚点**：`C2C_MSG_RECEIVE`、`FRIEND_ADD` 现在会填 `Event.EventID`（官方单聊 event_id 支持 INTERACTION_CREATE / C2C_MSG_RECEIVE / FRIEND_ADD）；此前 `ReplyToEvent(ev.EventID)` 拿到空串会静默退化成主动消息
+- **非幂等 POST 的传输层错误不再自动重试**：连接重置/读响应失败时请求可能已到达平台，重发会造成重复消息；5xx 上一轮已修，本轮补网络错误路径
+- **WS 心跳写失败不再静默**：单帧写加 10s 超时（`SetWriteDeadline`），写失败主动关闭连接以打断读循环（不再等最长 5 分钟的 `StaleTimeout`）；读帧加 8MB 上限（`SetReadLimit`）
+- **webhook 丢事件可观测**：队列满时调用 `Options.OnDrop(meta)`（含 event_id/type/原始体），宿主可落死信/告警；日志同时带 `dropped_total`
+- **apierr 判定边界补齐**：`IsAuth` 含 HTTP 401 与 1124x/1125x/1126x/1127x/1128x、304004/304036/40034105/40034127；`IsExpired` 补 40034024/40034025/40034027；新增 `apierr` 包内单测（覆盖率 0% → 86.7%）
+- **本地校验补齐**：指令面板（scope/target_type/元素数/name/desc/remark/link）、富媒体（file_type 1~4、URL 必须 http(s)、prepare 的 md5/sha1/md5_10m 必填且为 hex）、键盘按钮（id 必填且唯一、action.type 0/1/2、data 必填、permission_type 0~3）
+- **`Retry-After` 支持 HTTP-date 形态**（RFC 9110 两种都合法，原先只认整数秒）
+- **`Run` 无 Transport 时关闭 Events**：早退路径不再让 `range Events()` 的消费者永久阻塞
+- **`Event.MsgID` 只对消息类事件赋值**：互动/成员/申请等事件的 `d.id` 语义不同，混进 MsgID 会被误当被动回复锚点
+- **CI 护栏**：新增 gofmt 检查、UTF-8/BOM 检查、`go vet`、`go test -race`、全包 build（此前只有 test+build）
+
+### 新增
+
+- **消息**：`InputNotify`（`msg_type=6` 输入中状态，仅单聊）；`send.Message.IsWakeup`（互动召回，与 msg_id/event_id 互斥）；`ForceVerifyImageResource`（markdown 图片转存强校验）；键盘 `Anchor`（指令按钮唤起选图器）/ `PermissionType`（1 管理员 / 3 身份组）/ `SpecifyRoleIDs`；`send.AtEveryone` 常量
+- **群管理（2026-08/09 文档新增）**：`SetGroupMemberMute`（POST restrict_chat_setting，≤20 条、最长 30 天）、`ListGroupMembers` / `ListGroupMembersAll` / `GroupMemberInfo`、`BatchRemoveMembers`、`ListMemberBlacklist` / `UpdateMemberBlacklist`、`JoinRequestList` / `ApprovalJoinRequest`（均含本地校验与分页翻页）
+- **素材管理（2026-10-21 新增）**：`MaterialPrepare` / `MaterialPut` / `MaterialComplete` / `UploadMaterial`（三连封装）/ `ListMaterials` / `ListMaterialsAll` / `DeleteMaterial`，产出 `qqbot-media://` 引用供 Markdown 使用（与 `/files` 富媒体是两条链路）
+- **自定义菜单（2026-08-12 新增）**：`GetMenu` / `PutMenu` / `DeleteMenu`（仅 C2C，≤10 项、子菜单 ≤5 且不可嵌套，按官方"汉字算 2"计宽校验）
+- **机器人**：`GenerateURLLink`（分享链接 + callback_data ≤32 字符）
+- **事件字段**：`Event.Timestamp`（平台事件时间，明确命名）、`Event.JoinRequest`（入群申请全字段）、`Event.Interaction`（`data.resolved`：button_id/button_data/feedback_opt/authorize_data 等）、`Event.SubscribeResults`（订阅消息授权结果）、`FriendScene` / `SceneParam`（FRIEND_ADD）、`GroupMemberOpenID`；`GROUP_MEMBER_ADD/REMOVE` 的 `member_openid` 与 `GROUP_MSG_REJECT` 的 `op_member_openid` 现在能落到 `Event.Sender`
+- **ws**：`IntentGroupMemberEvent(1<<24)` / `IntentGuilds` 等 intent 常量、`DefaultIntents`、`ErrTerminalClose` 哨兵错误
+- **api**：`Config.RetryNonIdempotent`；`token.Deleter` 可选接口（支持主动失效的存储实现它）
+- **webhook**：`Options.QueueSize` / `Options.Workers` 可调（默认 256 / 32）
+
+### 变更（行为，向后兼容但需知晓）
+
+- **非幂等 POST 遇 5xx 默认不再自动重发**：平台可能已处理成功，重发会造成重复消息/重复资源。429 与网络错误仍重试；旧行为可显式 `api.Config{RetryNonIdempotent: true}`
+- **401 自动换 token 重试一次**（当 token 存储实现 `token.Deleter`，默认 `token.Memory` 已实现）：平台提前吊销 token 时不再一直失败到 TTL
+- **WS 关闭码三分类**：`4001/4002/4010~4014/4914/4915` → `Run` 返回 `ErrTerminalClose`（不再无限重连）；`4006/4007/4900~4913` → 先清 session 再 Identify；其余（4008/4009/1000/1001/传输错误）照旧退避重连
+- **access_token 端点默认值**改为官方统一域名 `https://api.bot.qq.com/app/getAppAccessToken`（旧 `bots.qq.com` 仍可 `Config.TokenURL` 覆盖）
+- **`message_reference` 只发官方字段 `message_id`**（去掉文档未定义的 `ignore_get_error`）
+- **`Run` 返回后再调 `Run` 不再 panic**（历史实现会 `send on closed channel`），现在入口直接返回 nil
+- **门面 `qqbot.Config` 新增 `Quota` / `RetryNonIdempotent`**：以前只有裸用 `api.New` 才能配，门面反而不可配
+
+### 废弃
+
+- `send.NewMarkdownTemplate`：官方已把 `custom_template_id` / `template_id` 标为【已废弃】，新代码请用 `send.Markdown`
+- `event.PartFace` / `PartMFace` / `PartAt`、`Part.FaceID` / `Part.Duration`：2026-11 文档无定义、解析从不产出，保留仅为不破坏既有 switch
+
+### 接入方影响
+
+- **编译兼容**：Bot（`go build ./...`）与 aichat 均已用本地 `replace` 编译通过；无导出符号删除，新增均为可选能力
+- **Bot 升级需同步改一处测试**：`internal/qqaccess/send_fallback_test.go::TestNoFallbackOn401` 断言"401 只发 1 次"；SDK 现在会换 token 后重试一次（2 次）。生产语义是修复（否则要等 token TTL 才恢复），不是回归
+- **WS 群成员/入群申请事件**：默认 intents 未包含 `1<<24`（未获平台权限的机器人订阅会 4014 断连）。需要时显式 `Intents: ws.DefaultIntents | ws.IntentGroupMemberEvent`
+- **依赖 POST 5xx 重试**的宿主：显式 `RetryNonIdempotent: true`
+- **频道（guild）场景仍不支持**：本 SDK 定位是 QQ 单聊 + 群聊，`/guilds/**`、频道 intents、频道私信均不在范围内（文档未删除，属有意的范围边界）
+
 ## 未发版（2026-11-02）— 协议兼容修复
 
 ### 修复

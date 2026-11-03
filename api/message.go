@@ -75,6 +75,71 @@ func isActiveMessage(msg *send.Message) bool {
 	return true
 }
 
+// Recall 撤回机器人自己发送的消息（DELETE /v2/{groups|users}/{openid}/messages/{message_id}）。
+//
+// 官方限制：只能撤回自己发的消息，且发送后 2 分钟内有效（超时平台返回错误）。
+// msgID 取 Send / StartStream 响应里的 Result.ID。
+func (c *Client) Recall(ctx context.Context, target Target, msgID string) error {
+	if msgID == "" {
+		return fmt.Errorf("api: 撤回的 message_id 不能为空")
+	}
+	path, err := scenePath(target.Scene, target.ID, "/messages/"+url.PathEscape(msgID))
+	if err != nil {
+		return err
+	}
+	tok, err := c.Token(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := c.do(ctx, http.MethodDelete, c.baseURL+path, tok, nil); err != nil {
+		return fmt.Errorf("api: recall message %s: %w", msgID, err)
+	}
+	return nil
+}
+
+// InputNotify 发送"正在输入"状态（msg_type=6，仅单聊，官方 input_notify）。
+//
+// 用于让用户端在生成回答前先看到输入中提示；seconds 是状态持续时间（1~60 秒，0 取 60）。
+// 必须带被动回复锚点 msgID（从消息事件 d.id 取），msgSeq 同一条消息内递增（0 取 1）。
+func (c *Client) InputNotify(ctx context.Context, userOpenID, msgID string, msgSeq, seconds int) error {
+	if userOpenID == "" {
+		return fmt.Errorf("api: user_openid 不能为空")
+	}
+	if msgID == "" {
+		return fmt.Errorf("api: input_notify 必须带被动回复 msg_id")
+	}
+	if seconds <= 0 {
+		seconds = 60
+	}
+	if seconds > 60 {
+		return fmt.Errorf("api: input_second 最长 60 秒（当前 %d）", seconds)
+	}
+	if msgSeq <= 0 {
+		msgSeq = 1
+	}
+	body := map[string]any{
+		"msg_type": 6,
+		"input_notify": map[string]any{
+			"input_type":   1,
+			"input_second": seconds,
+		},
+		"msg_id":  msgID,
+		"msg_seq": msgSeq,
+	}
+	path, err := scenePath(event.SceneC2C, userOpenID, "/messages")
+	if err != nil {
+		return err
+	}
+	tok, err := c.Token(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := c.do(ctx, http.MethodPost, c.baseURL+path, tok, body); err != nil {
+		return fmt.Errorf("api: input notify: %w", err)
+	}
+	return nil
+}
+
 // Me 拉取机器人自身信息（GET /users/@me）；启动时调用，失败应拒绝启动。
 func (c *Client) Me(ctx context.Context) (*qqtypes.User, error) {
 	tok, err := c.Token(ctx)
@@ -120,16 +185,23 @@ func buildSendBody(msg *send.Message) (map[string]any, error) {
 	case send.KindText:
 		body["content"] = msg.Content()
 	case send.KindMarkdown:
+		md := map[string]any{}
 		if tpl := msg.MarkdownTemplateData(); tpl != nil {
 			params := make([]map[string]any, 0, len(tpl.Params))
 			for _, p := range tpl.Params {
 				params = append(params, map[string]any{"key": p.Key, "values": p.Values})
 			}
 			// 官方 custom_template_id 是 string 类型（当前文档标记已废弃，但无模板权限的 bot 仍需走模板）。
-			body["markdown"] = map[string]any{"custom_template_id": tpl.ID, "params": params}
+			md["custom_template_id"] = tpl.ID
+			md["params"] = params
 		} else {
-			body["markdown"] = map[string]string{"content": msg.Content()}
+			md["content"] = msg.Content()
 		}
+		// 官方 force_verify_image_resource：图片转存失败时中断发送并报错（默认关闭）。
+		if msg.ImageVerifyEnabled() {
+			md["force_verify_image_resource"] = true
+		}
+		body["markdown"] = md
 	case send.KindMedia:
 		body["media"] = map[string]string{"file_info": msg.MediaFileInfo()}
 		// 官方要求 msg_type=7 时 content 有值（可为空格），否则部分场景会被平台拒绝。
@@ -150,8 +222,14 @@ func buildSendBody(msg *send.Message) (map[string]any, error) {
 		// 主动消息也带 msg_seq：避免平台按 seq + 内容把重复内容判重。
 		body["msg_seq"] = seq
 	}
+	// 互动召回消息：官方 is_wakeup 与 msg_id/event_id 互斥（Validate 已保证）。
+	if msg.WakeupEnabled() {
+		body["is_wakeup"] = true
+	}
 	if ref := msg.ReferenceIdx(); ref != "" {
-		body["message_reference"] = map[string]any{"message_id": ref, "ignore_get_error": true}
+		// 官方 MessageReference 只有 message_id；历史实现多发过 ignore_get_error
+		// （文档未定义），按文档收敛为单字段。
+		body["message_reference"] = map[string]any{"message_id": ref}
 	}
 	if kb := msg.KeyboardData(); kb != nil {
 		body["keyboard"] = keyboardBody(*kb)
@@ -195,11 +273,24 @@ func keyboardBody(kb send.Keyboard) map[string]any {
 	for _, row := range kb.Rows {
 		buttons := make([]map[string]any, 0, len(row))
 		for _, btn := range row {
-			// 官方 permission 语义：0=指定用户（配 specify_user_ids），1=管理员，2=所有人。
-			permission := map[string]any{"type": 2}
-			if len(btn.SpecifyUserIDs) > 0 {
-				permission["type"] = 0
-				permission["specify_user_ids"] = btn.SpecifyUserIDs
+			// 官方 permission 语义：0=指定用户（配 specify_user_ids），1=管理员，2=所有人，
+			// 3=指定身份组（specify_role_ids，仅频道）。
+			// 零值 PermissionType=0 表示"自动"：有指定对象时用 0，否则 2（与历史行为一致）。
+			permType := 2
+			if len(btn.SpecifyUserIDs) > 0 || len(btn.SpecifyRoleIDs) > 0 {
+				permType = 0
+			}
+			if btn.PermissionType == 1 || btn.PermissionType == 2 || btn.PermissionType == 3 {
+				permType = btn.PermissionType
+			}
+			permission := map[string]any{"type": permType}
+			if permType == 0 {
+				if len(btn.SpecifyUserIDs) > 0 {
+					permission["specify_user_ids"] = btn.SpecifyUserIDs
+				}
+				if len(btn.SpecifyRoleIDs) > 0 {
+					permission["specify_role_ids"] = btn.SpecifyRoleIDs
+				}
 			}
 			action := map[string]any{
 				"type":           btn.ActionType,
@@ -216,6 +307,10 @@ func keyboardBody(kb send.Keyboard) map[string]any {
 				}
 				if btn.Reply {
 					action["reply"] = true
+				}
+				// 官方 anchor：置 1 时点击按钮自动唤起手Q选图器（设置后忽略 enter）。
+				if btn.Anchor != 0 {
+					action["anchor"] = btn.Anchor
 				}
 			}
 			if btn.Modal != nil {

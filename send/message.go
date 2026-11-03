@@ -19,6 +19,11 @@ const (
 	maxRows       = 5
 	maxButtons    = 5
 	maxLabelRunes = 10
+
+	// AtEveryone 是群聊 @全体成员 的占位符（2026-10-26 文档新增）：
+	// 文本/Markdown 里写它即可 @ 全部成员。要求机器人是群管理员，且每个群每天只能用 1 次
+	// （超限平台返回 304019）。
+	AtEveryone = "<qqbot-at-everyone />"
 )
 
 // Kind 是消息内容类型（协议 msg_type 的语义化名字）。
@@ -67,6 +72,16 @@ type Button struct {
 	Reply bool
 	// Modal 二次确认（官方 modal）：点击按钮先弹确认框。
 	Modal *Modal
+	// Anchor 仅指令按钮（ActionType=2）有效：置 1 时点击按钮自动唤起手机 QQ 选图器，
+	// 设置后会忽略 Enter（官方 anchor，仅手机端 8983+ 单聊场景）。
+	Anchor int
+	// SpecifyRoleIDs 是权限身份组列表（官方 permission.specify_role_ids，仅频道可用）。
+	// 群/单聊场景请用 SpecifyUserIDs；两者可同时存在。
+	SpecifyRoleIDs []string
+	// PermissionType 覆盖按钮的 permission.type：
+	// 1=管理员，2=所有人，3=指定身份组（仅频道）。
+	// 零值 0 表示"自动"：有 SpecifyUserIDs/SpecifyRoleIDs 时为 0（指定对象），否则 2（所有人）。
+	PermissionType int
 }
 
 // Modal 是按钮点击的二次确认框（官方约束：content ≤40 字符且不能有 URL；
@@ -105,6 +120,10 @@ type Message struct {
 	replyID  string
 	replyEv  string // event_id 锚点（与 replyID 互斥）
 	seq      int
+	// wakeup 是互动召回消息：平台不校验被动回复窗口，但与 msg_id/event_id 互斥。
+	wakeup bool
+	// forceVerifyImage 对应 markdown.force_verify_image_resource：图片转存失败即报错。
+	forceVerifyImage bool
 }
 
 // MarkdownTemplate 是 Markdown 模板（custom_template_id + params；官方 custom_template_id 为 string）。
@@ -119,7 +138,11 @@ func Text(s string) *Message { return &Message{kind: KindText, text: s} }
 // Markdown 构造原生 Markdown 消息。
 func Markdown(content string) *Message { return &Message{kind: KindMarkdown, text: content} }
 
-// NewMarkdownTemplate 构造模板 Markdown 消息（模板需在机器人后台审核通过，填写审核下发的模板 ID）。
+// NewMarkdownTemplate 构造模板 Markdown 消息（custom_template_id + params）。
+//
+// Deprecated: 官方消息接口已把 MessageMarkdown.template_id / custom_template_id 标为
+// 【已废弃】，2026-04-23 起单聊/群聊自定义 Markdown 全量开放、无需模板审核。
+// 新代码请直接用 send.Markdown(content)；本函数仅为存量模板场景保留。
 func NewMarkdownTemplate(templateID string, params ...MarkdownParam) *Message {
 	return &Message{kind: KindMarkdown, mdTpl: &MarkdownTemplate{ID: templateID, Params: params}}
 }
@@ -176,6 +199,27 @@ func (m *Message) Seq(seq int) *Message {
 // SeqNo 返回当前 msg_seq（0 表示未设置）。
 func (m *Message) SeqNo() int { return m.seq }
 
+// IsWakeup 声明本条为互动召回消息（官方 is_wakeup）：
+// 用户主动对话后 30 天内、每个周期（当天/1-3 天/3-7 天/7-30 天）可下发 1 条。
+// 与 ReplyTo/ReplyToEvent 互斥（Validate 会拒绝同时设置）。
+func (m *Message) IsWakeup(v bool) *Message {
+	m.wakeup = v
+	return m
+}
+
+// WakeupEnabled 返回是否声明为互动召回消息。
+func (m *Message) WakeupEnabled() bool { return m.wakeup }
+
+// ForceVerifyImageResource 打开 markdown 图片转存强校验（官方 force_verify_image_resource）：
+// 图片转存失败时中断发送并返回错误，而不是静默丢弃图片。仅 Markdown 消息有效。
+func (m *Message) ForceVerifyImageResource(v bool) *Message {
+	m.forceVerifyImage = v
+	return m
+}
+
+// ImageVerifyEnabled 返回是否打开图片转存强校验。
+func (m *Message) ImageVerifyEnabled() bool { return m.forceVerifyImage }
+
 // Kind 返回内容类型。
 func (m *Message) Kind() Kind { return m.kind }
 
@@ -214,6 +258,13 @@ func (m *Message) Validate() error {
 	// 被动回复锚点：msg_id 与 event_id 二选一，seq 必须从 1 开始。
 	if m.replyID != "" && m.replyEv != "" {
 		return errors.New("send: msg_id 与 event_id 锚点只能二选一")
+	}
+	// 互动召回消息与被动回复锚点互斥（官方：is_wakeup 与 msg_id/event_id 互斥使用）。
+	if m.wakeup && (m.replyID != "" || m.replyEv != "") {
+		return errors.New("send: is_wakeup 与 msg_id/event_id 锚点互斥，不能同时设置")
+	}
+	if m.forceVerifyImage && m.kind != KindMarkdown {
+		return errors.New("send: force_verify_image_resource 仅对 Markdown 消息有效")
 	}
 	if m.seq < 0 {
 		return fmt.Errorf("send: msg_seq 不能为负数（当前 %d）", m.seq)
@@ -290,11 +341,19 @@ func validateKeyboard(k Keyboard) error {
 	if len(k.Rows) == 0 || len(k.Rows) > maxRows {
 		return fmt.Errorf("send: 键盘行数必须在 1~%d（当前 %d）", maxRows, len(k.Rows))
 	}
+	seenIDs := make(map[string]struct{})
 	for i, row := range k.Rows {
 		if len(row) == 0 || len(row) > maxButtons {
 			return fmt.Errorf("send: 键盘第 %d 行按钮数必须在 1~%d（当前 %d）", i+1, maxButtons, len(row))
 		}
 		for j, btn := range row {
+			if strings.TrimSpace(btn.ID) == "" {
+				return fmt.Errorf("send: 键盘第 %d 行第 %d 个按钮缺少 id（同一键盘内必须唯一）", i+1, j+1)
+			}
+			if _, dup := seenIDs[btn.ID]; dup {
+				return fmt.Errorf("send: 键盘按钮 id %q 重复（同一键盘内必须唯一）", btn.ID)
+			}
+			seenIDs[btn.ID] = struct{}{}
 			if utf8.RuneCountInString(btn.Label) < 1 || utf8.RuneCountInString(btn.Label) > maxLabelRunes {
 				return fmt.Errorf("send: 键盘第 %d 行第 %d 个按钮 label 长度必须在 1~%d（当前 %d）", i+1, j+1, maxLabelRunes, utf8.RuneCountInString(btn.Label))
 			}
@@ -303,8 +362,22 @@ func validateKeyboard(k Keyboard) error {
 			default:
 				return fmt.Errorf("send: 键盘第 %d 行第 %d 个按钮 style 非法 %d（合法 0/1/3/4）", i+1, j+1, btn.Style)
 			}
+			switch btn.ActionType {
+			case 0, 1, 2:
+			default:
+				return fmt.Errorf("send: 键盘第 %d 行第 %d 个按钮 action.type 非法 %d（合法 0 跳转/1 回调/2 指令）", i+1, j+1, btn.ActionType)
+			}
 			if btn.ActionType == 0 && btn.Link == "" {
 				return fmt.Errorf("send: 键盘第 %d 行第 %d 个按钮是跳转类型但 link 为空", i+1, j+1)
+			}
+			// 官方：type=1/2 时 data 必填（回调数据 / 指令内容）。
+			if btn.ActionType != 0 && strings.TrimSpace(btn.ActionData) == "" {
+				return fmt.Errorf("send: 键盘第 %d 行第 %d 个按钮 action.type=%d 时 data 必填", i+1, j+1, btn.ActionType)
+			}
+			switch btn.PermissionType {
+			case 0, 1, 2, 3:
+			default:
+				return fmt.Errorf("send: 键盘第 %d 行第 %d 个按钮 permission_type 非法 %d（合法 0/1/2/3）", i+1, j+1, btn.PermissionType)
 			}
 			if btn.Modal != nil {
 				if n := utf8.RuneCountInString(btn.Modal.Content); n < 1 || n > 40 {

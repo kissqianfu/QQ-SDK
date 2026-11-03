@@ -42,6 +42,9 @@ func New(cfg Config) (*Client, error) {
 		Logger:    cfg.Logger,
 		BaseURL:   cfg.BaseURL,
 		TokenURL:  cfg.TokenURL,
+		Quota:     cfg.Quota,
+
+		RetryNonIdempotent: cfg.RetryNonIdempotent,
 	})
 	if err != nil {
 		return nil, err
@@ -54,6 +57,15 @@ func New(cfg Config) (*Client, error) {
 // 同一 Client 只允许 Run 一次：重复调用返回错误（SDK 内部管理重连/心跳，外部不用管）。
 func (c *Client) Run(ctx context.Context) error {
 	if c.cfg.Transport == nil {
+		// 没有接入通道时 Run 立即返回；同时关闭事件通道，保证 range Events() 的消费者
+		// 不会被永久阻塞（与"Run 返回后 SDK 负责关闭 Events"的注释一致）。
+		c.mu.Lock()
+		c.closed = true
+		c.mu.Unlock()
+		c.closeOnce.Do(func() {
+			close(c.done)
+			close(c.events)
+		})
 		return errors.New("qqbot: Transport 未配置，无法 Run")
 	}
 	runCtx, cancel := context.WithCancel(ctx)
@@ -75,6 +87,10 @@ func (c *Client) Run(ctx context.Context) error {
 	defer func() {
 		c.mu.Lock()
 		c.running = false
+		// 必须置 closed：Run 收尾时已 close(events)，若之后再次 Run，
+		// transport 往 events 写会 panic: send on closed channel。
+		// 置位后第二次 Run 在入口直接返回 nil（与"Close 后 Run"同一语义）。
+		c.closed = true
 		c.mu.Unlock()
 		c.closeOnce.Do(func() {
 			close(c.done)

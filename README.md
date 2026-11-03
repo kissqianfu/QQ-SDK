@@ -3,13 +3,16 @@
 QQ 官方机器人接入层 SDK（Go）：零业务依赖、可整体拆卸替换。
 
 - 接入：WebSocket + Webhook 双通道（`Transport` 接口，SDK 不替业务起 server）
-- REST：access_token 刷新（提前 90s、互斥）、群/单聊发消息、`Me`（`GET /users/@me`）、富媒体上传、互动事件响应（`PUT /interactions/{id}`）
-- 消息：文本 / 原生 Markdown / **Markdown 模板**（`custom_template_id`+params）/ 富媒体 / 图文卡片；键盘支持自定义与**模板短形式**（`{"keyboard":{"id":...}}`）；被动回复锚点支持 `msg_id` 与 `event_id` 二选一
+- REST：access_token 刷新（提前 90s、互斥、401 自动换票重试一次）、群/单聊发消息、撤回、`Me`（`GET /users/@me`）、富媒体上传、**素材管理**（`qqbot-media://`）、互动事件响应（`PUT /interactions/{id}`）、**分享链接**
+- 消息：文本 / 原生 Markdown / **Markdown 模板**（`custom_template_id`+params，官方已标废弃）/ 富媒体 / 图文卡片 / **输入中状态（msg_type=6）** / **互动召回（is_wakeup）**；键盘支持自定义与**模板短形式**（`{"keyboard":{"id":...}}`）；被动回复锚点支持 `msg_id` 与 `event_id` 二选一
 - 协议正确性内置：`send.Message` 构造器做本地校验（卡片 title≤50 / url 必须 https / 键盘行列上限等）
-- 事件：平台语义的 `event.Event`（无业务字段）
-- 错误：`apierr.APIError` 判定方法（`IsDuplicate` / `IsExpired` / `IsAuth` / `IsRateLimited`）
-- 稳健性内置：WS 心跳判活（读空闲超时自动重连）、指数退避（稳定连接断线后重置）、429 `Retry-After`、ctx 取消即停重试
+- 事件：平台语义的 `event.Event`（无业务字段）；含 Mentions / Ark / Elements / **JoinRequest / Interaction(data.resolved) / SubscribeResults**
+- 错误：`apierr.APIError` 判定方法（`IsDuplicate` / `IsExpired` / `IsAuth` / `IsRateLimited`），按官方 `err_code` 解析
+- 稳健性内置：WS 心跳判活（读空闲超时自动重连）、指数退避（稳定连接断线后重置）、**关闭码三分类**（下架/封禁/intent 无权限 → 停止重连）、429 `Retry-After`、ctx 取消即停重试、非幂等 POST 5xx 不自动重发
 - 发送前**主动配额**内置（三层：群聊 60 QPM / 单聊 10 QPS / 单关系 20 QPM + 每目标每日 1000 条），本地拒绝时不触达平台
+- 群管理：群信息 / 机器人群内状态 / 禁言查询与**设置** / **群成员列表与详情** / **批量移出** / **群黑名单** / **入群申请列表与审批**
+- 指令面板（`/v2/panels`）+ **全局自定义菜单（`/v2/menu`）**
+- **范围边界**：只做 QQ 单聊 + 群聊。频道（guild）域的 `/guilds/**`、频道 intents、频道私信均**不支持**
 
 ## 安装
 
@@ -31,6 +34,8 @@ import (
 c, err := qqbot.New(qqbot.Config{
     AppID: "app", AppSecret: "secret",
     Transport: mustWS(c), // 见下
+    // 可选：三层配额（门面也能配置/关闭；nil = 默认口径）
+    // Quota: &api.QuotaConfig{GroupQPM: 60, SingleQPS: 10},
 })
 if err != nil { return err }
 go func() {
@@ -107,6 +112,32 @@ _, _ = c.Sender().Send(ctx, target, send.Markdown(reply).ReplyTo(ev.MsgID, 1))
 _, _ = c.Sender().Send(ctx, target, send.Markdown(reply).ReplyToEvent(ev.ID, 1))
 ```
 
+### 撤回 / 输入中 / 互动召回 / @全体
+
+```go
+res, _ := c.Sender().Send(ctx, target, send.Text("临时消息"))
+_ = c.Sender().Recall(ctx, target, res.ID)   // 2 分钟内；管理员可撤群成员消息
+
+// 单聊"正在输入"（msg_type=6），需被动回复锚点；最长 60 秒
+_ = c.Sender().InputNotify(ctx, userOpenID, ev.MsgID, 1, 30)
+
+// 互动召回：用户主动对话后 30 天内的 4 个周期各可下发 1 条（与 msg_id/event_id 互斥）
+_, _ = c.Sender().Send(ctx, api.Target{Scene: event.SceneC2C, ID: userOpenID},
+    send.Text("好久不见，要试试新功能吗").IsWakeup(true))
+
+// 群 @全体成员（需群管理员；每群每天 1 次，超限平台返回 304019）
+_, _ = c.Sender().Send(ctx, target, send.Markdown("**维护通知** " + send.AtEveryone))
+```
+
+Markdown 还可以打开图片转存强校验（转存失败就报错而不是静默丢图）：
+`send.Markdown(md).ForceVerifyImageResource(true)`。
+
+### 键盘按钮
+
+`send.Button` 支持官方 `action` 的完整字段：`Anchor=1`（指令按钮点击后唤起手Q选图器）、
+`PermissionType`（1=管理员 / 3=指定身份组，零值自动：有指定对象→0，否则 2=所有人）、
+`SpecifyUserIDs` / `SpecifyRoleIDs`、`Modal`（二次确认）、`Enter` / `Reply`（指令按钮）。
+
 ## 出站主动消息配额（三层）
 
 `Client.Send` 是所有发送形态的唯一出口，配额就实现在这里，**宿主不需要也不应该再自己计数**：
@@ -127,13 +158,16 @@ _, _ = c.Sender().Send(ctx, target, send.Markdown(reply).ReplyToEvent(ev.ID, 1))
 > 否则日志里只留一行字符串、看不到 `layer`。
 
 ```go
-// 默认即开启，按上表口径；要调就传 Quota：
+// 默认即开启，按上表口径；要调就传 Quota（api.New 与门面 qqbot.New 都支持）：
 c, _ := api.New(api.Config{
     AppID: appID, AppSecret: appSecret,
     Quota: &api.QuotaConfig{GroupQPM: 60, SingleQPS: 10, RelationQPM: 20, DailyPerTarget: 1000},
 })
 // 需要整体关闭时：Quota: &api.QuotaConfig{Disable: true}
 ```
+
+> **未认证机器人**：平台对未认证 bot 的额度更低（群 30 qpm；单聊 5 qps 且 30 qpm）。
+> SDK 默认按"已认证"口径（60/10），未认证宿主请显式调小，否则本地放行但平台会 429。
 
 - **被动回复不计入**：带 `msg_id`（`ReplyTo`）或 `event_id`（`ReplyToEvent`）的消息直接放行。
 - **被本地拒绝时不会调用平台**：判定发生在取 token/发请求之前，这才真的省额度。
@@ -198,6 +232,53 @@ state, _ := c.Sender().GroupBotState(ctx, groupOpenID)       // 入群时间/是
 rs, _ := c.Sender().GroupRestrictSetting(ctx, groupOpenID)   // 全员禁言规则 + 禁言中的成员列表
 ```
 
+## 群治理：禁言 / 成员 / 黑名单 / 入群申请
+
+2026-08/09 文档新增的一批群管理能力（除禁言外均标注「内邀接入中」，未开通返回 11253）。所有方法都做本地校验（条数上限、op 取值、禁言 30 天上限）：
+
+```go
+s := c.Sender()
+
+// 设置/更新/解除成员禁言（单次 ≤20；add/update 必须给到期时间，最长 30 天）
+err = s.SetGroupMemberMute(ctx, groupOpenID, []api.MemberMuteOp{
+    {Op: api.MuteOpAdd, MemberOpenID: m1, MuteExpireAt: "2026-11-10T12:00:00+08:00"},
+    {Op: api.MuteOpDel, MemberOpenID: m2},
+})
+
+// 群成员（内邀）
+members, _ := s.ListGroupMembers(ctx, groupOpenID, "")   // cursor 翻页
+all, _ := s.ListGroupMembersAll(ctx, groupOpenID)        // 自动翻页（护栏 100 页）
+one, _ := s.GroupMemberInfo(ctx, groupOpenID, memberOpenID)
+
+// 批量移出（≤20）+ 可选拉黑
+rm, _ := s.BatchRemoveMembers(ctx, groupOpenID, api.BatchRemoveMembersRequest{
+    MemberOpenIDs: []string{m1, m2}, AddToMemberBlacklist: true,
+})
+
+// 群黑名单（内邀）
+bl, _ := s.ListMemberBlacklist(ctx, groupOpenID, "", 50)
+res, _ := s.UpdateMemberBlacklist(ctx, groupOpenID, api.MemberBlacklistRequest{
+    Op: api.BlacklistOpAdd, MemberOpenIDs: []string{m3},
+})
+
+// 入群申请：列表 → 审批（需要 GROUP_JOIN_REQUEST 事件或列表里的 join_request_id）
+reqs, _ := s.JoinRequestList(ctx, groupOpenID, "", 20)
+err = s.ApprovalJoinRequest(ctx, groupOpenID, memberOpenID, api.JoinApprovalRequest{
+    Op: api.JoinOpDecline, JoinRequestID: reqs.List[0].JoinRequestID,
+    RejectReason: "满员", AddToMemberBlacklist: true,
+})
+```
+
+`GROUP_JOIN_REQUEST` 事件经 SDK 归一化为 `ev.JoinRequest`（含 `JoinRequestID` / `ApplySource` / `VerifyInfo` / `AutoApprovedStrategyID`），可直接驱动审批：
+
+```go
+if ev.Type == event.GroupJoinRequest && ev.JoinRequest != nil {
+    err := s.ApprovalJoinRequest(ctx, ev.TargetID, ev.JoinRequest.MemberOpenID, api.JoinApprovalRequest{
+        Op: api.JoinOpApprove, JoinRequestID: ev.JoinRequest.JoinRequestID,
+    })
+}
+```
+
 ## 指令面板
 
 C 端输入框 "/" 拉起的指令面板（单聊/群聊/文字子频道/频道私信四场景），全量 CRUD：
@@ -227,6 +308,40 @@ s.DeletePanel(ctx, id)
 
 错误码 40030006 面板不存在、40030011 scope 不合法、40030021 全局面板不支持关联对象，均通过 `apierr.APIError.Code` 判断。
 
+## 全局自定义菜单
+
+和指令面板不同：菜单是**单聊输入框旁**的固定入口，全局唯一、对所有用户一致（仅 C2C）。PUT 是全量覆盖，`DeleteMenu` 等于清空：
+
+```go
+state, _ := c.Sender().GetMenu(ctx)          // 含 Menu + Version（从未配置时 version=0）
+
+ver, _ := c.Sender().PutMenu(ctx, api.Menu{Items: []api.MenuItem{
+    {Name: "帮助", Type: api.MenuItemSendMessage, SendMessage: "/help"},
+    {Name: "官网", Type: api.MenuItemLink, Link: "https://example.com"},
+    {Name: "更多", Type: api.MenuItemMenu, SubMenuItems: []api.MenuSubItem{
+        {Name: "设置", Type: api.MenuItemSendMessage, SendMessage: "/settings"},
+    }},
+    {Name: "联网", Type: api.MenuItemSwitch, Switch: &api.MenuSwitch{SwitchID: "web", Default: true}},
+}})
+```
+
+本地校验按官方口径：菜单项 ≤10、子菜单 ≤5 且不能再嵌套；名称按「ASCII 算 1、汉字算 2」计宽（一级 ≤10 / 二级 ≤14）；link 必须 `https://`。
+
+## 素材管理（Markdown 图片，qqbot-media://）
+
+2026-10-21 新增：把图片预上传到平台换取 `qqbot-media://` 引用，**不依赖公网图床**。注意它与 `/files` 富媒体（msg_type=7）是两条链路：
+
+```go
+img, _ := c.Sender().UploadMaterial(ctx, "kline.png", "image/png", pngBytes)
+// img.URL = qqbot-media://image/v1/<token>，可直接写进 Markdown：
+md := fmt.Sprintf("![K线 #800px #400px](%s)", img.URL)
+
+list, _ := c.Sender().ListMaterials(ctx, "")        // 有效图片列表（含 expires_at）
+_ = c.Sender().DeleteMaterial(ctx, img.ImageID)     // 释放配额（单 bot 上限 100 张）
+```
+
+底层三步也可分开调用（`MaterialPrepare` → `MaterialPut` → `MaterialComplete`）。单图 ≤10MB、仅 png/jpeg/gif/webp，扩展名必须与 Content-Type 一致（本地先校验）。
+
 ## 消息事件结构化字段
 
 消息类事件（C2C_MESSAGE_CREATE / GROUP_AT_MESSAGE_CREATE / GROUP_MESSAGE_CREATE）除 `Parts` 分段外，还解析了官方的三个结构化字段：
@@ -242,6 +357,33 @@ ev.Elements // []event.MessageElement：msg_elements（message_type=103 引用�
 ```
 
 `MessageType` 判别：0=文本、3=ARK 卡片（看 `ev.Ark`）、101=并行消息、102=聊天记录、103=引用消息（看 `ev.Elements` 与 `ev.RefMsgIdx`）。
+
+非消息事件的关键字段（2026-08/09 文档新增）：
+
+```go
+ev.Timestamp        // 平台事件时间（ReceivedAt 是历史字段，取同一值）
+ev.JoinRequest      // GROUP_JOIN_REQUEST：JoinRequestID / ApplySource / VerifyInfo / AutoApprovedStrategyID
+ev.Interaction      // INTERACTION_CREATE 的 data.resolved：ButtonID / ButtonData / FeedbackOpt / AuthorizeData
+ev.SubscribeResults // SUBSCRIBE_MESSAGE_STATUS：TemplateID / Op / SubscribeID ...
+ev.FriendScene      // FRIEND_ADD 的场景值（1000/1001/...）
+ev.SceneParam       // FRIEND_ADD 的 callback_data（配合 GenerateURLLink 做邀请来源归因）
+```
+
+> INTENT：WS 默认订阅 `GROUP_AND_C2C_EVENT(1<<25) | INTERACTION(1<<26)`。
+> `GROUP_MEMBER_ADD/REMOVE`、`GROUP_JOIN_REQUEST` 属于 `GROUP_MEMBER_EVENT(1<<24)`，
+> 默认**不**订阅（未获该能力的机器人订阅会被 4014 断开）；需要时显式
+> `Intents: ws.DefaultIntents | ws.IntentGroupMemberEvent`。
+
+## 重试与生命周期（v0.3.0 起）
+
+- **网络错误 / 429**：自动重试（上限 3 次，指数退避；429 优先用 `Retry-After`）。
+- **5xx**：只对幂等方法（GET/PUT/DELETE）自动重试；**非幂等 POST 默认不重发**（平台可能已处理，
+  重发会重复发消息）。要恢复旧行为：`api.Config{RetryNonIdempotent: true}`。
+- **401**：token 存储实现 `token.Deleter`（默认 `token.Memory` 已实现）时，自动作废缓存 →
+  换新 token → 重试一次，不再一直失败到 TTL。
+- **WS 关闭码**：`4001/4002/4010~4014/4914/4915` 视为不可恢复，`Run` 返回 `ws.ErrTerminalClose`
+  （宿主应告警/退出）；`4006/4007/4900~4913` 先清 session 再 Identify；其余退避重连。
+- `Run` 正常返回后再调用 `Run` 是安全的（返回 nil，不再 panic）。
 
 ## 错误处理
 
@@ -260,6 +402,9 @@ if errors.As(err, &apiErr) {
     }
 }
 ```
+
+`apierr.APIError.Code` 来自官方错误体的 **`err_code`**（历史 `code` 也兼容），`TraceID` 来自
+`trace_id`，`HTTP` 是状态码。判错请用 `Code`，不要依赖 `message` 文本（官方明确 message 会变）。
 
 ## 开发
 

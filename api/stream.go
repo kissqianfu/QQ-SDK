@@ -91,6 +91,9 @@ func (c *Client) StartStream(ctx context.Context, target Target, content string,
 	if ct != StreamText && ct != StreamMarkdown {
 		return nil, fmt.Errorf("api: 未知流式内容类型 %q", ct)
 	}
+	// 归一化结果必须写回 cfg：frame() 用的是 s.cfg.ContentType，
+	// 否则空串会原样进请求体（平台按"显式空字符串"解析，不是"未传"）。
+	cfg.ContentType = ct
 	if cfg.MsgSeq == 0 {
 		cfg.MsgSeq = 1
 	}

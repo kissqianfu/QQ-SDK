@@ -53,6 +53,12 @@ const (
 	InteractionCreate Type = "INTERACTION_CREATE"
 )
 
+// 入群申请来源（GROUP_JOIN_REQUEST 的 apply_source）取值；与 API 侧列表接口同口径。
+const (
+	JoinApplySelf    = "self_apply" // 用户自己申请
+	JoinApplyInvited = "invited"    // 被群成员邀请
+)
+
 // PartKind 是消息段类型。
 type PartKind string
 
@@ -63,14 +69,17 @@ const (
 	PartImage PartKind = "image"
 	// PartVoice 是语音段。
 	PartVoice PartKind = "voice"
-	// PartFace 是 QQ 内置表情段。
-	PartFace PartKind = "face"
-	// PartMFace 是商城表情段。
-	PartMFace PartKind = "mface"
 	// PartVideo 是视频段。
 	PartVideo PartKind = "video"
 	// PartFile 是文件段。
 	PartFile PartKind = "file"
+
+	// Deprecated: 以下三个取值在 2026-11 的官方文档里没有定义，parse 也从不会产出
+	// （接收侧附件只有 voice / image/* / video/mp4 / file）。保留仅为不破坏既有 switch。
+	// PartFace 是 QQ 内置表情段。
+	PartFace PartKind = "face"
+	// PartMFace 是商城表情段。
+	PartMFace PartKind = "mface"
 	// PartAt 是 @ 段。
 	PartAt PartKind = "at"
 )
@@ -89,7 +98,6 @@ type Part struct {
 	Text     string
 	URL      string
 	MIME     string
-	FaceID   string
 	Duration time.Duration
 	// Width/Height 是图片尺寸（仅图片附件，官方字段）。
 	Width  int
@@ -98,6 +106,10 @@ type Part struct {
 	WavURL string
 	// ASRText 是语音消息的官方 ASR 参考结果（仅语音附件，可能为空，官方 asr_refer_text）。
 	ASRText string
+
+	// Deprecated: FaceID / Duration 在 2026-11 的官方 MessageAttachment 里没有对应字段，
+	// parse 也从不赋值。保留仅为不破坏既有代码。
+	FaceID string
 }
 
 // Event 是归一化后的入站事件。
@@ -108,13 +120,16 @@ type Event struct {
 	TargetID   string // group_openid / user_openid
 	Sender     Sender
 	MsgID      string // 被动回复锚点
-	EventID    string // 被动回复锚点（event_id）：INTERACTION_CREATE / GROUP_ADD_ROBOT / GROUP_MSG_RECEIVE
+	EventID    string // 被动回复锚点（event_id）：INTERACTION_CREATE / C2C_MSG_RECEIVE / FRIEND_ADD / GROUP_ADD_ROBOT / GROUP_MSG_RECEIVE
 	AtMe       bool
 	Parts      []Part
 	RefIdx     string // 引用回复用：MessageScene.ext 的 msg_idx（机器人引用他人消息时传给 send.Message.Reference）
 	RefMsgIdx  string // 本条消息所引用的消息索引（MessageScene.ext 的 ref_msg_idx，用户发引用消息时存在）
 	Raw        []byte
 	ReceivedAt time.Time
+	// Timestamp 是平台事件时间（事件体 d.timestamp，RFC3339 / Unix 秒均归一化）。
+	// ReceivedAt 是历史字段，取同一个平台时间；需要"本地收到时间"的业务请自行记录。
+	Timestamp time.Time
 
 	// MessageType 是消息内容类型（仅消息类事件）：
 	// 0=普通文本、3=结构化卡片、101=并行消息、102=聊天记录、103=引用消息（官方 message_type）。
@@ -122,19 +137,106 @@ type Event struct {
 
 	// InteractionType 是互动事件类型（仅 INTERACTION_CREATE）：
 	// 11=消息按钮回调、12=快捷菜单回调（这两类必须调 Interact 回应）；
-	// 13=消息反馈、14=清空会话、15=进出故事集、16=切换模型、18/19=授权等（无需回应）。
+	// 13=消息反馈、14=清空会话、15=进出故事集、16=切换模型、18/19=授权、20=群授权状态变更（无需回应）。
 	InteractionType int
+
+	// Interaction 是 INTERACTION_CREATE 的 data.resolved（按钮 id/data、反馈选项、授权范围等）；
+	// 非互动事件为 nil。
+	Interaction *InteractionData
 
 	// Mentions 是消息中 @ 的用户列表（官方 mentions，平台保证不含 @ 机器人自身；仅消息类事件）。
 	Mentions []Sender
 
 	// Ark 是结构化卡片数据（官方 ark_data，message_type=3 时有值）：
 	// ark_type: tuwen=图文H5 / feed=图文卡片 / miniapp=小程序 / map=位置 /
-	// contact_card=好友名片 / video_share=视频分享 / music_together=一起听歌。
+	// contact_card=好友名片 / video_share=视频分享 / music_together=一起听歌 /
+	// picture=图片（2026-09-16 新增）。
 	Ark *ArkData
 
 	// Elements 是消息元素列表（官方 msg_elements，message_type=103 引用消息时含被引用内容，可递归嵌套）。
 	Elements []MessageElement
+
+	// JoinRequest 仅 GROUP_JOIN_REQUEST（机器人是群管理员时下发）：
+	// JoinRequestID 是审批接口 /approval_join_request 的必填参数。
+	JoinRequest *JoinRequest
+
+	// SubscribeResults 仅 SUBSCRIBE_MESSAGE_STATUS：每个订阅模板的授权结果。
+	SubscribeResults []SubscribeResult
+
+	// FriendScene / SceneParam 仅 FRIEND_ADD：scene 是添加来源场景值（1000/1001/...），
+	// SceneParam 是开发者生成分享链接时传入的 callback_data 透传值。
+	FriendScene string
+	SceneParam  string
+
+	// GroupMemberOpenID 仅群场景互动事件（INTERACTION_CREATE 的 group_member_openid）。
+	GroupMemberOpenID string
+}
+
+// InteractionData 是互动事件的解析后数据（官方 data.resolved）。
+type InteractionData struct {
+	// ButtonID / ButtonData 是"用户点了哪个按钮"的唯一依据（type=11 消息按钮）。
+	ButtonID   string
+	ButtonData string
+	UserID     string // 仅频道场景
+	FeatureID  string // 仅快捷菜单（管理端配置的功能 ID）
+	MessageID  string // 操作的消息 ID
+	// FeedbackOpt 仅 type=13：LIKE=点赞 / UNLIKE=点踩。
+	FeedbackOpt string
+	// Checked 仅 type=13：反馈选项是否选中。
+	Checked bool
+	// Action 仅 type=15/16：ENTER_STORY / QUIT_STORY 等操作动作。
+	Action string
+	// MessageSceneExt 仅 type=13：message_scene.ext 的键值对（如 "disable_net_search=1"）。
+	MessageSceneExt []string
+	// AuthorizeData 仅 type=18/19：用户/群授权数据。
+	AuthorizeData *AuthorizeData
+}
+
+// AuthorizeData 是授权事件的数据（官方 authorize_data）。
+type AuthorizeData struct {
+	// OptScene 授权操作场景：setting=资料页设置 / dialog=弹窗授权。
+	OptScene string
+	// Scope 授权范围：c2c_push=C2C 主动消息推送 / group_push=群主动消息推送。
+	Scope string
+}
+
+// JoinRequest 是入群申请（官方 GROUP_JOIN_REQUEST 事件体）。
+type JoinRequest struct {
+	// JoinRequestID 审批接口的必填参数。
+	JoinRequestID string
+	MemberOpenID  string
+	Username      string
+	ApplyAt       string
+	// ApplySource 申请来源：self_apply / invited。
+	ApplySource string
+	InvitedBy   string
+	VerifyInfo  *VerifyInfo
+	// AutoApprovedStrategyID 自动审批命中的策略 ID（官方 auto_approved.strategy_id）。
+	AutoApprovedStrategyID string
+}
+
+// VerifyInfo 是入群申请的验证信息。
+type VerifyInfo struct {
+	Method        string
+	VerifyMessage string
+	ReviewQAList  []VerifyQA
+}
+
+// VerifyQA 是入群验证的一对问答。
+type VerifyQA struct {
+	Question string
+	Answer   string
+}
+
+// SubscribeResult 是订阅消息授权状态（官方 SubscribeMsgTemplateResult）。
+type SubscribeResult struct {
+	TemplateID       int    // 平台订阅模板 ID
+	CustomTemplateID string // 自定义订阅模板 ID
+	Op               int    // 1=允许订阅 / 2=拒绝订阅
+	// SubscribeID 发送订阅消息时使用的订阅 ID。
+	SubscribeID string
+	SubscribeTS int64
+	UpdateTS    int64
 }
 
 // ArkData 是结构化卡片消息数据（官方 ark_data；fields 的常见键：title/desc/jump_url/preview/

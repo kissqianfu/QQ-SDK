@@ -95,7 +95,7 @@ func TestKeyboardValidation(t *testing.T) {
 		{name: "no rows", kb: Keyboard{}, want: "行数"},
 		{name: "empty row", kb: Keyboard{Rows: [][]Button{{}}}, want: "按钮数"},
 		{name: "empty label", kb: Keyboard{Rows: [][]Button{{{ID: "1"}}}}, want: "label"},
-		{name: "link missing", kb: Keyboard{Rows: [][]Button{{{Label: "去", ActionType: 0}}}}, want: "link"},
+		{name: "link missing", kb: Keyboard{Rows: [][]Button{{{ID: "1", Label: "去", ActionType: 0}}}}, want: "link"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

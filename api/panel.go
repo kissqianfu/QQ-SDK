@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
+	"unicode/utf8"
 )
 
 // 指令面板 scope（生效场景）取值。
@@ -151,6 +153,9 @@ func (c *Client) CreatePanel(ctx context.Context, req PanelCreateRequest) (strin
 	if req.Scope == "" {
 		return "", fmt.Errorf("api: scope 不能为空")
 	}
+	if err := validatePanelCreate(req); err != nil {
+		return "", err
+	}
 	tok, err := c.Token(ctx)
 	if err != nil {
 		return "", err
@@ -188,6 +193,9 @@ func (c *Client) PanelDetail(ctx context.Context, panelID string) (*PanelRecord,
 func (c *Client) UpdatePanel(ctx context.Context, panelID string, panel Panel) (int, error) {
 	if panelID == "" {
 		return 0, fmt.Errorf("api: panel_id 不能为空")
+	}
+	if err := validatePanel(panel); err != nil {
+		return 0, err
 	}
 	tok, err := c.Token(ctx)
 	if err != nil {
@@ -251,4 +259,79 @@ func decodeJSON(raw []byte, out any) error {
 		return fmt.Errorf("api: decode response: %w", err)
 	}
 	return nil
+}
+
+// 面板协议上限（官方请求体约束）。
+const (
+	maxPanelItems    = 20
+	maxPanelNameRune = 14
+	maxPanelDescRune = 30
+	maxPanelRemark   = 255
+	maxPanelTargets  = 20
+)
+
+// validatePanel 校验面板内容本身（元素类型/长度/链接）。
+func validatePanel(p Panel) error {
+	if len(p.Items) > maxPanelItems {
+		return fmt.Errorf("api: 面板元素最多 %d 个（当前 %d）", maxPanelItems, len(p.Items))
+	}
+	if n := utf8.RuneCountInString(p.Remark); n > maxPanelRemark {
+		return fmt.Errorf("api: 面板 remark 最多 %d 字符（当前 %d）", maxPanelRemark, n)
+	}
+	for i, item := range p.Items {
+		if n := utf8.RuneCountInString(item.Name); n < 1 || n > maxPanelNameRune {
+			return fmt.Errorf("api: items[%d].name 长度必须在 1~%d（当前 %d）", i, maxPanelNameRune, n)
+		}
+		if n := utf8.RuneCountInString(item.Desc); n > maxPanelDescRune {
+			return fmt.Errorf("api: items[%d].desc 最多 %d 字符（当前 %d）", i, maxPanelDescRune, n)
+		}
+		switch item.Type {
+		case PanelItemCommand:
+		case PanelItemLink:
+			if !strings.HasPrefix(item.Link, "https://") {
+				return fmt.Errorf("api: items[%d] 是 link 类型但 link 必须以 https:// 开头（当前 %q）", i, item.Link)
+			}
+		default:
+			return fmt.Errorf("api: items[%d].type 仅支持 command/link，当前 %q", i, item.Type)
+		}
+	}
+	return nil
+}
+
+// validatePanelCreate 校验创建请求（scope/target_type/关联对象与内容）。
+func validatePanelCreate(req PanelCreateRequest) error {
+	switch req.Scope {
+	case PanelScopeC2C, PanelScopeGroup, PanelScopeChannel, PanelScopeDM:
+	default:
+		return fmt.Errorf("api: scope 仅支持 c2c/group/channel/dm，当前 %q", req.Scope)
+	}
+	target := req.TargetType
+	if target == "" {
+		target = PanelTargetAll
+	}
+	switch target {
+	case PanelTargetAll, PanelTargetSpecific:
+	default:
+		return fmt.Errorf("api: target_type 仅支持 all/specific，当前 %q", target)
+	}
+	// channel/dm 是全局配置，只能 all。
+	if (req.Scope == PanelScopeChannel || req.Scope == PanelScopeDM) && target == PanelTargetSpecific {
+		return fmt.Errorf("api: scope=%s 只能使用 target_type=all（不支持定向）", req.Scope)
+	}
+	if len(req.UserOpenIDs) > maxPanelTargets || len(req.GroupOpenIDs) > maxPanelTargets {
+		return fmt.Errorf("api: 关联用户/群一次最多 %d 个", maxPanelTargets)
+	}
+	if target == PanelTargetSpecific {
+		switch req.Scope {
+		case PanelScopeC2C:
+			if len(req.UserOpenIDs) == 0 {
+				return fmt.Errorf("api: scope=c2c 且 target_type=specific 时必须给 user_openids")
+			}
+		case PanelScopeGroup:
+			if len(req.GroupOpenIDs) == 0 {
+				return fmt.Errorf("api: scope=group 且 target_type=specific 时必须给 group_openids")
+			}
+		}
+	}
+	return validatePanel(req.Panel)
 }

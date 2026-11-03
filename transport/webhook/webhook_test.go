@@ -112,8 +112,11 @@ func serve(h *Handler, body []byte, headers map[string]string) *httptest.Respons
 	return rec
 }
 
-// TestChallengeInputValidation 覆盖 op13 的输入校验（B-02 验收项）：
-// 只有"32 位 hex + 数字时间戳 + 窗口内"才出签名。
+// TestChallengeInputValidation 覆盖 op13 的输入校验（B-02 验收项 + 2026-11 文档对齐）：
+// 只有"字母数字 token + 数字时间戳 + 窗口内"才出签名。
+//
+// 口径来自官方文档示例：plain_token 是 20 位字母数字（"Arq0D5A61EgUu4OxUvOp"），
+// 所以不能锁死成 32 位 hex（那会把平台自己的挑战全拒掉，回调地址永远验证不通过）。
 func TestChallengeInputValidation(t *testing.T) {
 	now := strconv.FormatInt(time.Now().Unix(), 10)
 	stale := strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10)
@@ -127,9 +130,10 @@ func TestChallengeInputValidation(t *testing.T) {
 	}{
 		{"合法 32 位 hex + 当前时间", tok, now, http.StatusOK},
 		{"大写 hex 放行", strings.Repeat("A1", 16), now, http.StatusOK},
-		{"非 hex（旧用例的 pt-1）", "pt-1", now, http.StatusBadRequest},
-		{"超长 64 位 hex", strings.Repeat("ab", 32), now, http.StatusBadRequest},
-		{"含非 hex 字符", strings.Repeat("z1", 16), now, http.StatusBadRequest},
+		{"官方示例 20 位字母数字", "Arq0D5A61EgUu4OxUvOp", now, http.StatusOK},
+		{"太短（旧用例的 pt-1）", "pt-1", now, http.StatusBadRequest},
+		{"超长 65 位字母数字", strings.Repeat("ab", 32) + "c", now, http.StatusBadRequest},
+		{"含非字母数字字符", "pt-1abcdefgh", now, http.StatusBadRequest},
 		{"event_ts 非数字", tok, "abc", http.StatusBadRequest},
 		{"event_ts 缺失", tok, "", http.StatusBadRequest},
 		{"event_ts 超窗", tok, stale, http.StatusBadRequest},

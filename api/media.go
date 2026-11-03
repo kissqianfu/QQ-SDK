@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kissqianfu/QQ-SDK/event"
@@ -84,6 +85,12 @@ func (c *Client) UploadFileDetail(ctx context.Context, scene event.Scene, target
 	if fileURL == "" {
 		return nil, fmt.Errorf("api: upload url 不能为空")
 	}
+	if !strings.HasPrefix(fileURL, "http://") && !strings.HasPrefix(fileURL, "https://") {
+		return nil, fmt.Errorf("api: upload url 必须是 http(s) 绝对地址（当前 %q）", fileURL)
+	}
+	if err := validateFileType(fileType); err != nil {
+		return nil, err
+	}
 	return c.uploadMediaDetail(ctx, scene, targetID, map[string]any{
 		"file_type":    fileType,
 		"url":          fileURL,
@@ -111,6 +118,9 @@ func (c *Client) UploadFileDataDetail(ctx context.Context, scene event.Scene, ta
 	}
 	if len(data) > maxFileDataBytes {
 		return nil, fmt.Errorf("api: file_data 直传上限 %d 字节，请改用 UploadFileBytes 分片上传", int64(maxFileDataBytes))
+	}
+	if err := validateFileType(fileType); err != nil {
+		return nil, err
 	}
 	return c.uploadMediaDetail(ctx, scene, targetID, map[string]any{
 		"file_type":    fileType,
@@ -160,6 +170,19 @@ func (c *Client) uploadMediaDetail(ctx context.Context, scene event.Scene, targe
 func (c *Client) UploadPrepare(ctx context.Context, scene event.Scene, targetID string, req UploadPrepareRequest) (*UploadPrepareResult, error) {
 	if req.FileName == "" {
 		return nil, fmt.Errorf("api: upload file_name 不能为空")
+	}
+	if err := validateFileType(req.FileType); err != nil {
+		return nil, err
+	}
+	// 官方 prepare 要求三个校验和全部提供（md5 / sha1 / md5_10m，均为 16 进制串）。
+	if err := validateDigest("md5", req.MD5); err != nil {
+		return nil, err
+	}
+	if err := validateDigest("sha1", req.SHA1); err != nil {
+		return nil, err
+	}
+	if err := validateDigest("md5_10m", req.MD5TenM); err != nil {
+		return nil, err
 	}
 	if req.FileSize <= 0 {
 		return nil, fmt.Errorf("api: upload file_size 必须 > 0")
@@ -359,6 +382,29 @@ func (c *Client) UploadFileBytes(ctx context.Context, scene event.Scene, targetI
 		return "", fmt.Errorf("api: 分片总大小 %d 与文件长度 %d 不一致", offset, len(data))
 	}
 	return c.MergeUpload(ctx, scene, targetID, fileName, fileType, prep.UploadID)
+}
+
+// validateFileType 校验富媒体类型：1=图片 2=视频 3=语音 4=文件。
+func validateFileType(fileType int) error {
+	switch fileType {
+	case 1, 2, 3, 4:
+		return nil
+	}
+	return fmt.Errorf("api: file_type 仅支持 1(图片)/2(视频)/3(语音)/4(文件)，当前 %d", fileType)
+}
+
+// validateDigest 校验 prepare 的校验和字段：必填且为 16 进制串。
+func validateDigest(field, digest string) error {
+	if digest == "" {
+		return fmt.Errorf("api: upload_prepare 的 %s 必填", field)
+	}
+	if len(digest)%2 != 0 {
+		return fmt.Errorf("api: upload_prepare 的 %s 不是合法 16 进制串", field)
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return fmt.Errorf("api: upload_prepare 的 %s 不是合法 16 进制串: %w", field, err)
+	}
+	return nil
 }
 
 // parseUploadSize 解析响应里的字符串字节数。

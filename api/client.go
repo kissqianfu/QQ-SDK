@@ -4,14 +4,18 @@
 //
 // 包内模块边界（每文件一个域，互不越界）：
 //   - client.go  构造与生命周期（Config / Client / New）
-//   - token.go   access_token 缓存与刷新
-//   - http.go    HTTP 传输细节（单次请求 / 重试骨架 / 退避 / 错误体解析）
-//   - message.go 发消息 / 撤回 / Me
-//   - media.go   富媒体上传（URL / base64 / 分片）
+//   - token.go   access_token 缓存与刷新（401 时按 token.Deleter 主动失效）
+//   - http.go    HTTP 传输细节（单次请求 / 重试骨架 / 退避 / 错误体解析 / 关闭码外的一切传输策略）
+//   - message.go 发消息 / 撤回 / 输入中 / Me
+//   - media.go   富媒体上传（URL / base64 / 分片，产出 file_info）
+//   - material.go 素材管理（/v2/media-images，产出 qqbot-media:// 引用）
 //   - stream.go  单聊流式回复
 //   - panel.go   指令面板 CRUD
-//   - group.go   群管理查询（info / bot_state / restrict_chat_setting）
+//   - menu.go    全局自定义菜单（仅 C2C）
+//   - group.go   群管理查询（info / bot_state / restrict_chat_setting GET）
+//   - group_admin.go 群治理写接口（禁言设置 / 成员 / 黑名单 / 入群申请）
 //   - interaction.go 互动事件回应
+//   - misc.go    机器人域零散接口（分享链接）
 package api
 
 import (
@@ -29,8 +33,10 @@ const (
 	// ProdBaseURL 是正式环境 REST 地址（2026-08 起官方统一域名）。
 	// 旧地址 https://api.sgroup.qq.com 仍可用，可通过 Config.BaseURL 覆盖；沙箱为 sandbox.api.sgroup.qq.com。
 	ProdBaseURL = "https://api.bot.qq.com"
-	// AuthURL 是换取 access_token 的地址（注意不是 API 域名；bots.qq.com 与 api.bot.qq.com 均官方在列）。
-	AuthURL = "https://bots.qq.com/app/getAppAccessToken"
+	// AuthURL 是换取 access_token 的地址。
+	// 官方 2026-08-10 起把接口域名统一为 api.bot.qq.com，access_token 端点也随之；
+	// 旧域名 https://bots.qq.com/app/getAppAccessToken 历史上可用，可用 Config.TokenURL 覆盖。
+	AuthURL = "https://api.bot.qq.com/app/getAppAccessToken"
 )
 
 // Config 是 REST 客户端参数；New 只做校验，不发请求。
@@ -47,6 +53,11 @@ type Config struct {
 	TokenURL string
 	// Sleep 可注入（测试用）；nil 用真实时间且等待 ctx 感知。
 	Sleep func(time.Duration)
+
+	// RetryNonIdempotent 为 true 时，非幂等请求（POST）遇到 5xx 也重试。
+	// 默认 false：平台可能在返回 5xx 前已处理成功，重发会造成重复消息/重复资源。
+	// 429 与网络错误不受本开关影响（始终重试）。
+	RetryNonIdempotent bool
 
 	// Quota 是出站主动消息三层配额；nil 表示用默认口径（群 60 QPM / 单聊 10 QPS /
 	// 单关系 20 QPM / 每目标每日 1000 条）。QuotaConfig.Disable 可整体关闭。
@@ -66,6 +77,9 @@ type Client struct {
 	sleepCtx func(ctx context.Context, d time.Duration) error
 	quota    *quota // nil = 配额关闭（Config.Quota.Disable 或未构造）
 
+	// retryNonIdempotent 见 Config.RetryNonIdempotent。
+	retryNonIdempotent bool
+
 	mu sync.Mutex // 串行刷新 token（单进程，不需要分布式锁）
 }
 
@@ -82,6 +96,8 @@ func New(cfg Config) (*Client, error) {
 		http:     cfg.HTTP,
 		tokens:   cfg.Tokens,
 		log:      cfg.Logger,
+
+		retryNonIdempotent: cfg.RetryNonIdempotent,
 	}
 	if c.baseURL == "" {
 		c.baseURL = ProdBaseURL

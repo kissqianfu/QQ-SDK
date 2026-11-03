@@ -58,8 +58,19 @@ type Options struct {
 	MaxBody int64
 	Logger  *slog.Logger
 
+	// QueueSize / Workers 是异步派发队列容量与消费并发（0 = 默认 256 / 32）。
+	//
+	// ⚠️ ACK 先于处理发出，平台不会重推；队列满时事件会被丢弃并计入 Dropped()。
+	// OnEvent 慢（例如同步写库/调外部接口）的宿主应调大 QueueSize/Workers，
+	// 或把 OnEvent 里再做一次"入自己的持久队列"，避免突发下静默丢事件。
+	QueueSize int
+	Workers   int
+
 	// Deduper 可选：返回 false 表示重复（只 ACK、不回调）。
 	Deduper func(ctx context.Context, meta EventMeta) (bool, error)
+	// OnDrop 可选：事件因队列满被丢弃时回调（ACK 已发出、平台不会重推，属不可恢复丢事件）。
+	// 宿主应在这里落死信表/打点告警；注意回调在 HTTP 请求 goroutine 上执行，必须快速返回。
+	OnDrop func(meta EventMeta)
 	// OnEvent 收到已验签事件后调用（ACK 之后异步执行）。
 	OnEvent func(ctx context.Context, ev *event.Event)
 }
@@ -100,16 +111,22 @@ func New(opts Options) (*Handler, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
+	if opts.QueueSize <= 0 {
+		opts.QueueSize = queueSize
+	}
+	if opts.Workers <= 0 {
+		opts.Workers = maxWorkers
+	}
 	seed := seedFromSecret(opts.Secret)
 	h := &Handler{
 		opts:  opts,
 		key:   ed25519.NewKeyFromSeed(seed),
 		now:   time.Now,
-		queue: make(chan []byte, queueSize),
+		queue: make(chan []byte, opts.QueueSize),
 		log:   opts.Logger,
 	}
 	if opts.OnEvent != nil {
-		for range maxWorkers {
+		for range opts.Workers {
 			go h.worker()
 		}
 	}
@@ -228,17 +245,20 @@ func (h *Handler) withinWindow(ts int64) bool {
 // 攻击者把任意事件体塞进 plain_token 就能拿到它的合法签名（签名预言机），
 // 再以同一个 event_ts 作 X-Signature-Timestamp、该 token 作 body 发 op0，
 // 验签必然通过 ⇒ 可伪造任意入站事件（例如 GroupDelRobot 解绑告警群）。
-// 把被签名的内容锁死在"纯数字时间戳 + 32 位 hex"之后，它不可能构成 JSON 事件信封。
+// 把被签名的内容锁死在"纯数字时间戳 + 字母数字 token"之后，它不可能构成 JSON 事件信封
+// （JSON 必然含 { } " : ，这些字符都被拒）。
 //
-// 大小写都放行：官方下发的是小写 hex，放宽大小写不削弱安全性，
-// 但能避免官方某天改大小写直接把回调打死。
-func isPlainToken(s string) bool {
-	if len(s) != 32 {
+// 为什么不锁 32 位 hex：官方文档的回调验证示例里 plain_token 是 20 位字母数字
+// （"Arq0D5A61EgUu4OxUvOp"），把口径卡成 32 位 hex 会把平台自己的挑战全部拒掉，
+// 回调地址将永远验证不通过；8~64 位字母数字同时覆盖官方示例与历史 32 位 hex 形态。
+func isChallengeToken(s string) bool {
+	const minLen, maxLen = 8, 64
+	if len(s) < minLen || len(s) > maxLen {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
-		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
 		default:
 			return false
 		}
@@ -249,7 +269,7 @@ func isPlainToken(s string) bool {
 // handleChallenge 处理 op13 URL 校验：签名内容 = event_ts + plain_token。
 //
 // ⚠️ 这是全流程里唯一"不验签就给签名"的入口，因此把入参卡到最窄形态：
-// 时间戳必须是数字且在窗口内、plain_token 必须是 32 位 hex（见 isPlainToken）。
+// 时间戳必须是数字且在窗口内、plain_token 必须是 8~64 位字母数字（见 isChallengeToken）。
 // 任何一项不合法都直接 400，绝不产出签名。
 func (h *Handler) handleChallenge(w http.ResponseWriter, r *http.Request, d json.RawMessage) {
 	// appid 校验与 op0 同口径：只在配置了期望值且请求带了头时比对。
@@ -269,8 +289,8 @@ func (h *Handler) handleChallenge(w http.ResponseWriter, r *http.Request, d json
 		http.Error(w, "bad challenge payload", http.StatusBadRequest)
 		return
 	}
-	if !isPlainToken(payload.PlainToken) {
-		h.rejectChallenge(w, "plain_token 不是 32 位 hex")
+	if !isChallengeToken(payload.PlainToken) {
+		h.rejectChallenge(w, "plain_token 不是 8~64 位字母数字")
 		return
 	}
 	ts, err := strconv.ParseInt(payload.EventTS, 10, 64)
@@ -307,8 +327,19 @@ func (h *Handler) dispatch(body []byte) {
 	select {
 	case h.queue <- body:
 	default:
+		// ⚠️ ACK 已发出，平台不会重推，这里丢事件是**不可恢复**的。
+		// 调用 OnDrop 让宿主落死信/告警（默认只计数 + 一条 Warn）。
 		h.dropped.Add(1)
-		h.log.Warn("webhook 处理队列已满，丢弃事件")
+		meta := EventMeta{Raw: body}
+		var env event.Envelope
+		if err := json.Unmarshal(body, &env); err == nil {
+			meta.ID, meta.Type = env.ID, env.T
+		}
+		h.log.Warn("webhook 处理队列已满，丢弃事件（不可恢复，请调大 QueueSize/Workers 或改异步落库）",
+			"event_id", meta.ID, "type", meta.Type, "dropped_total", h.dropped.Load())
+		if h.opts.OnDrop != nil {
+			h.opts.OnDrop(meta)
+		}
 	}
 }
 

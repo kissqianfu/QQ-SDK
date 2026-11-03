@@ -12,7 +12,7 @@
 //	├─ transport      接入通道契约（Transport 接口）
 //	│  ├─ transport/ws       WebSocket 接入（心跳/重连/Resume）
 //	│  └─ transport/webhook  Webhook 接入（Ed25519 验签/队列派发）
-//	├─ api            REST 客户端（发消息/富媒体/流式/面板/群管理/互动）
+//	├─ api            REST 客户端（发消息/撤回/富媒体/素材/流式/面板/菜单/群管理/互动）
 //	│  └─ 依赖 apierr/token/event/send/qqtypes
 //	├─ event          入站事件模型与解析（含 fuzz 覆盖）
 //	├─ send           出站消息构造（文本/Markdown/键盘/卡片）

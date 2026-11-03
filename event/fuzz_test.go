@@ -80,8 +80,16 @@ func FuzzParse(f *testing.F) {
 		}
 		var d dispatchData
 		_ = json.Unmarshal(env.D, &d)
-		if ev.MsgID != d.ID {
-			t.Fatalf("MsgID = %q, want d.id %q", ev.MsgID, d.ID)
+		// MsgID 只对消息类事件赋值（互动/成员/申请等事件的 d.id 含义不同，不能混进来）。
+		switch ev.Type {
+		case C2CMessageCreate, GroupAtMessageCreate, GroupMessageCreate:
+			if ev.MsgID != d.ID {
+				t.Fatalf("MsgID = %q, want d.id %q", ev.MsgID, d.ID)
+			}
+		default:
+			if ev.MsgID != "" {
+				t.Fatalf("非消息事件 MsgID = %q，want 空（t=%q）", ev.MsgID, env.T)
+			}
 		}
 	})
 }

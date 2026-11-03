@@ -48,38 +48,54 @@ func Parse(raw []byte) (*Event, error) {
 	ev.AtMe = env.T == string(GroupAtMessageCreate)
 
 	// event_id 被动回复锚点：官方"从事件最外层的 id 获取"，
-	// 支持事件：INTERACTION_CREATE（取 d.id）、GROUP_ADD_ROBOT、GROUP_MSG_RECEIVE（这俩 d 里没有 id，取外层）。
+	// 支持事件：INTERACTION_CREATE（取 d.id）、GROUP_ADD_ROBOT、GROUP_MSG_RECEIVE
+	// （后两个 d 里没有 id，取外层）；单聊还支持 C2C_MSG_RECEIVE、FRIEND_ADD。
 	switch ev.Type {
 	case InteractionCreate:
 		// 官方注明 interaction_id 不带 "INTERACTION_CREATE:" 前缀；历史事件出现过带前缀形态，防御性剥掉。
 		ev.EventID = firstNonEmpty(strings.TrimPrefix(d.ID, "INTERACTION_CREATE:"), env.ID)
 		ev.InteractionType = d.InteractionType
-		if s := sceneFromString(d.Scene); s != 0 {
+		if s := sceneFromString(d.sceneString()); s != 0 {
 			ev.Scene = s
+		}
+		ev.GroupMemberOpenID = d.GroupMemberOID
+		if d.Data != nil && d.Data.Resolved != nil {
+			ev.Interaction = d.Data.Resolved.model()
 		}
 	case GroupAddRobot:
 		ev.EventID = firstNonEmpty(d.ID, env.ID)
 	case GroupMsgReceive:
+		ev.EventID = firstNonEmpty(d.ID, env.ID)
+	case C2CMsgReceive, FriendAdd:
+		// 单聊场景官方支持 event_id 回复的事件是 INTERACTION_CREATE / C2C_MSG_RECEIVE /
+		// FRIEND_ADD（群聊是 INTERACTION_CREATE / GROUP_ADD_ROBOT / GROUP_MSG_RECEIVE）。
+		// 都取"事件最外层的 id"；d.id 只是防御性兜底。
 		ev.EventID = firstNonEmpty(d.ID, env.ID)
 	}
 
 	ev.TargetID = d.targetID(ev.Scene)
 	ev.Sender = d.Author.sender()
 	switch ev.Type {
-	case GroupAddRobot, GroupDelRobot:
-		// 官方事件体只有 op_member_openid（操作加/退群的成员），author 缺失。
+	case GroupAddRobot, GroupDelRobot, GroupMsgReject:
+		// 这些事件体只有 op_member_openid（操作成员），author 缺失。
 		if id := d.OpMemberOpenID; id != "" {
 			ev.Sender = Sender{ID: id}
 		}
 	}
 	// FRIEND_ADD/DEL 的 author 只有 union_openid，用户 openid 在顶层 d.openid。
+	// GROUP_MEMBER_ADD/REMOVE / GROUP_JOIN_REQUEST 的成员 openid 在 d.member_openid。
 	if ev.Sender.ID == "" {
-		ev.Sender.ID = d.OpenID
+		ev.Sender.ID = firstNonEmpty(d.OpenID, d.MemberOpenID, d.GroupMemberOID)
 	}
 	if ev.TargetID == "" && ev.Scene == SceneC2C {
 		ev.TargetID = d.OpenID
 	}
-	ev.MsgID = d.ID
+	// MsgID 只对消息类事件赋值：其他事件（互动/成员/申请…）的 d.id 含义不同，
+	// 混进 MsgID 会被业务误当成被动回复锚点。
+	switch ev.Type {
+	case C2CMessageCreate, GroupAtMessageCreate, GroupMessageCreate:
+		ev.MsgID = d.ID
+	}
 	ev.RefIdx, ev.RefMsgIdx = d.refIdxs()
 	ev.Parts = d.parts()
 	ev.Mentions = d.mentions()
@@ -88,7 +104,19 @@ func Parse(raw []byte) (*Event, error) {
 	}
 	ev.Elements = elementsFrom(d.Elements, 0)
 	if ts := qqtypes.ParseTime(d.Timestamp); !ts.IsZero() {
+		// ReceivedAt 是历史字段（取平台事件时间，保留旧语义）；Timestamp 是同一值的明确命名。
 		ev.ReceivedAt = ts
+		ev.Timestamp = ts
+	}
+
+	switch ev.Type {
+	case FriendAdd:
+		ev.FriendScene = d.friendScene()
+		ev.SceneParam = d.SceneParam
+	case GroupJoinRequest:
+		ev.JoinRequest = d.joinRequest()
+	case SubscribeMessageStatus:
+		ev.SubscribeResults = d.subscribeResults()
 	}
 	return ev, nil
 }
@@ -104,16 +132,23 @@ func firstNonEmpty(ss ...string) string {
 }
 
 // dispatchData 是 d 字段的并集（不同事件类型字段不同，缺的字段自然为零值）。
+//
+// ⚠️ scene 在两种事件里类型不同：INTERACTION_CREATE 是字符串（c2c/group/guild），
+// FRIEND_ADD 是整数场景值（1000/1001/...）。用 json.RawMessage 兜住，避免
+// "一个字段类型不匹配导致整包解析失败、所有字段一起丢"。
 type dispatchData struct {
 	ID              string          `json:"id"`
 	OpenID          string          `json:"openid"`       // FRIEND_ADD/DEL 的用户 openid（官方字段名是 openid，不是 user_openid）
 	InteractionType int             `json:"type"`         // INTERACTION_CREATE 的互动类型（11/12/13...）
-	Scene           string          `json:"scene"`        // INTERACTION_CREATE 的会话场景（c2c/group）
+	Scene           json.RawMessage `json:"scene"`        // INTERACTION_CREATE: c2c/group；FRIEND_ADD: 整数值
+	SceneParam      string          `json:"scene_param"`  // FRIEND_ADD: 分享链接透传的 callback_data
 	MessageType     int             `json:"message_type"` // 消息内容类型：0=文本 3=结构化卡片 101=并行消息 102=聊天记录 103=引用消息
 	Content         string          `json:"content"`
 	GroupOpenID     string          `json:"group_openid"`
 	UserOpenID      string          `json:"user_openid"`
-	OpMemberOpenID  string          `json:"op_member_openid"` // GROUP_ADD/DEL_ROBOT：操作加/退群的成员
+	OpMemberOpenID  string          `json:"op_member_openid"`    // GROUP_ADD/DEL_ROBOT、GROUP_MSG_REJECT：操作成员
+	GroupMemberOID  string          `json:"group_member_openid"` // INTERACTION_CREATE 群场景的成员 openid
+	MemberOpenID    string          `json:"member_openid"`       // GROUP_MEMBER_ADD/REMOVE、GROUP_JOIN_REQUEST
 	ChannelID       string          `json:"channel_id"`
 	Timestamp       json.RawMessage `json:"timestamp"`
 	Author          authorData      `json:"author"`
@@ -124,6 +159,74 @@ type dispatchData struct {
 	MessageScene    struct {
 		Ext []json.RawMessage `json:"ext"`
 	} `json:"message_scene"`
+
+	// GROUP_JOIN_REQUEST
+	JoinRequestID string           `json:"join_request_id"`
+	Username      string           `json:"username"`
+	ApplyAt       string           `json:"apply_at"`
+	ApplySource   string           `json:"apply_source"`
+	InvitedBy     string           `json:"invited_by"`
+	VerifyInfo    *verifyInfoData  `json:"verify_info"`
+	AutoApproved  *autoApprovedDat `json:"auto_approved"`
+
+	// SUBSCRIBE_MESSAGE_STATUS
+	Result []subscribeResultData `json:"result"`
+
+	// INTERACTION_CREATE 的 data（含 resolved）
+	Data *interactionData `json:"data"`
+}
+
+// verifyInfoData 是入群申请的验证信息。
+type verifyInfoData struct {
+	Method        string         `json:"method"`
+	VerifyMessage string         `json:"verify_message"`
+	ReviewQAList  []verifyQAData `json:"review_qa_list"`
+}
+
+// verifyQAData 是入群验证问答。
+type verifyQAData struct {
+	Question string `json:"question"`
+	Answer   string `json:"answer"`
+}
+
+// autoApprovedDat 是自动审批命中的策略。
+type autoApprovedDat struct {
+	StrategyID string `json:"strategy_id"`
+}
+
+// subscribeResultData 是订阅消息模板的授权结果。
+type subscribeResultData struct {
+	TemplateID       int    `json:"template_id"`
+	CustomTemplateID string `json:"custom_template_id"`
+	Op               int    `json:"op"`
+	SubscribeID      string `json:"subscribe_id"`
+	SubscribeTS      int64  `json:"subscribe_ts"`
+	UpdateTS         int64  `json:"update_ts"`
+}
+
+// interactionData 是 INTERACTION_CREATE 的 d.data。
+type interactionData struct {
+	Type     int                    `json:"type"`
+	Resolved *interactionResolvedIn `json:"resolved"`
+}
+
+// interactionResolvedIn 是官方 data.resolved。
+type interactionResolvedIn struct {
+	ButtonData   string `json:"button_data"`
+	ButtonID     string `json:"button_id"`
+	UserID       string `json:"user_id"`
+	FeatureID    string `json:"feature_id"`
+	MessageID    string `json:"message_id"`
+	FeedbackOpt  string `json:"feedback_opt"`
+	Checked      int    `json:"checked"`
+	Action       string `json:"action"`
+	MessageScene struct {
+		Ext []string `json:"ext"`
+	} `json:"message_scene"`
+	AuthorizeData *struct {
+		OptScene string `json:"opt_scene"`
+		Scope    string `json:"scope"`
+	} `json:"authorize_data"`
 }
 
 // authorData 是事件里的 d.author（完整 User 对象，自带 bot 标记）。
@@ -337,4 +440,91 @@ func sceneFromString(s string) Scene {
 	default:
 		return 0
 	}
+}
+
+// sceneString 取 d.scene 的字符串形态（INTERACTION_CREATE 用）；非字符串返回空。
+func (d dispatchData) sceneString() string {
+	raw := strings.TrimSpace(string(d.Scene))
+	if raw == "" || raw == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(d.Scene, &s); err == nil {
+		return s
+	}
+	return strings.Trim(raw, `"`)
+}
+
+// friendScene 取 FRIEND_ADD 的 scene 场景值（官方为整数 1000/1001/...）。
+// 保留字符串形态（数字/引号数字都能读），业务按取值判断来源即可。
+func (d dispatchData) friendScene() string {
+	raw := strings.TrimSpace(string(d.Scene))
+	if raw == "" || raw == "null" {
+		return ""
+	}
+	return strings.Trim(raw, `"`)
+}
+
+// joinRequest 归一化 GROUP_JOIN_REQUEST 的事件体。
+func (d dispatchData) joinRequest() *JoinRequest {
+	if d.JoinRequestID == "" && d.MemberOpenID == "" {
+		return nil
+	}
+	jr := &JoinRequest{
+		JoinRequestID: d.JoinRequestID,
+		MemberOpenID:  d.MemberOpenID,
+		Username:      d.Username,
+		ApplyAt:       d.ApplyAt,
+		ApplySource:   d.ApplySource,
+		InvitedBy:     d.InvitedBy,
+	}
+	if d.VerifyInfo != nil {
+		vi := &VerifyInfo{Method: d.VerifyInfo.Method, VerifyMessage: d.VerifyInfo.VerifyMessage}
+		for _, qa := range d.VerifyInfo.ReviewQAList {
+			vi.ReviewQAList = append(vi.ReviewQAList, VerifyQA{Question: qa.Question, Answer: qa.Answer})
+		}
+		jr.VerifyInfo = vi
+	}
+	if d.AutoApproved != nil {
+		jr.AutoApprovedStrategyID = d.AutoApproved.StrategyID
+	}
+	return jr
+}
+
+// subscribeResults 归一化 SUBSCRIBE_MESSAGE_STATUS 的 result[]。
+func (d dispatchData) subscribeResults() []SubscribeResult {
+	if len(d.Result) == 0 {
+		return nil
+	}
+	out := make([]SubscribeResult, 0, len(d.Result))
+	for _, r := range d.Result {
+		out = append(out, SubscribeResult{
+			TemplateID:       r.TemplateID,
+			CustomTemplateID: r.CustomTemplateID,
+			Op:               r.Op,
+			SubscribeID:      r.SubscribeID,
+			SubscribeTS:      r.SubscribeTS,
+			UpdateTS:         r.UpdateTS,
+		})
+	}
+	return out
+}
+
+// model 归一化官方 data.resolved。
+func (r *interactionResolvedIn) model() *InteractionData {
+	out := &InteractionData{
+		ButtonID:        r.ButtonID,
+		ButtonData:      r.ButtonData,
+		UserID:          r.UserID,
+		FeatureID:       r.FeatureID,
+		MessageID:       r.MessageID,
+		FeedbackOpt:     r.FeedbackOpt,
+		Checked:         r.Checked != 0,
+		Action:          r.Action,
+		MessageSceneExt: r.MessageScene.Ext,
+	}
+	if r.AuthorizeData != nil {
+		out.AuthorizeData = &AuthorizeData{OptScene: r.AuthorizeData.OptScene, Scope: r.AuthorizeData.Scope}
+	}
+	return out
 }

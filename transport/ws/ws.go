@@ -39,13 +39,78 @@ const (
 	// maxStale 是默认读空闲判死阈值的上限（防 Hello 下发异常大的 heartbeat_interval
 	// 导致半死连接数天探测不到；显式配置 StaleTimeout 不受此限）。
 	maxStale = 5 * time.Minute
+	// writeTimeout 是单帧写超时：半死 TCP 下 WriteJSON 可能永久阻塞，心跳协程会静默卡死。
+	writeTimeout = 10 * time.Second
+	// maxFrameBytes 是单帧读上限（防异常大帧打爆内存；网关正常事件远小于此）。
+	maxFrameBytes = 8 << 20
 )
 
 // 控制帧错误：交给 Run 的重连循环决定下一步。
 var (
 	errReconnect      = errors.New("ws: 平台要求重连")
 	errInvalidSession = errors.New("ws: session 失效")
+	// ErrTerminalClose 表示平台以"不可恢复"的关闭码断开（机器人已下架/被封禁/
+	// intent 无权限/opcode 或 payload 无效等）。Run 会直接返回它，不再无限重连，
+	// 宿主应据此告警或退出，而不是当作网络抖动。
+	ErrTerminalClose = errors.New("ws: 网关关闭码不可恢复，停止重连")
 )
+
+// Intent 位（官方 intents；本 SDK 只涉及群聊/单聊相关位）。
+//
+// ⚠️ GROUP_MEMBER_EVENT(1<<24) 不放进默认值：未获平台该能力的机器人订阅这一位
+// 会被 4014 断开。需要收 GROUP_MEMBER_ADD/REMOVE、GROUP_JOIN_REQUEST 的宿主
+// 显式写 Intents: DefaultIntents | IntentGroupMemberEvent，并自行承担权限风险。
+const (
+	IntentGuilds           uint32 = 1 << 0  // 频道（本 SDK 不支持）
+	IntentGuildMembers     uint32 = 1 << 1  // 频道成员（本 SDK 不支持）
+	IntentGroupMemberEvent uint32 = 1 << 24 // GROUP_MEMBER_ADD / GROUP_MEMBER_REMOVE / GROUP_JOIN_REQUEST
+	IntentGroupAndC2CEvent uint32 = 1 << 25 // C2C_MESSAGE_CREATE / GROUP_AT_MESSAGE_CREATE / GROUP_MESSAGE_CREATE 等
+	IntentInteraction      uint32 = 1 << 26 // INTERACTION_CREATE
+)
+
+// DefaultIntents 是 Options.Intents 为 0 时的默认订阅（群聊/单聊消息 + 互动）。
+const DefaultIntents = IntentGroupAndC2CEvent | IntentInteraction
+
+// wsCloseError 携带网关关闭码（gorilla 的 *websocket.CloseError 提取而来）。
+type wsCloseError struct {
+	code int
+	text string
+}
+
+// Error 实现 error。
+func (e *wsCloseError) Error() string {
+	return fmt.Sprintf("ws: 网关关闭 code=%d text=%q", e.code, e.text)
+}
+
+// closeAction 是关闭码的处置策略。
+type closeAction int
+
+const (
+	closeReconnect       closeAction = iota // 可重连（可 Resume）
+	closeResumeForbidden                    // 可重连，但必须清 session 后重新 Identify
+	closeTerminal                           // 不可恢复，Run 直接返回 ErrTerminalClose
+)
+
+// classifyClose 按官方《WebSocket 错误码》表判定关闭码处置。
+//
+// 依据 https://bot.q.qq.com/wiki/develop/api-v2/openapi/error/error.html ：
+//   - 4001/4002：opcode/payload 无效 ⇒ SDK 自身 bug 或协议版本不兼容，重连只会刷日志；
+//   - 4010~4014：shard/version/intent 配置态错误，同参数重连永远失败；
+//   - 4914/4915：机器人已下架/被封禁，运营态，重连无意义；
+//   - 4006/4007：session 无效/seq 错误 ⇒ 官方表 resume=否、identify=是，必须先清 session；
+//   - 4008/4009：发送过快/连接过期 ⇒ 退避后重连即可；
+//   - 4900~4913：内部错误 ⇒ 官方表 resume=否、identify=是，按"清 session 后 Identify"处理；
+//   - 1000/1001/1005（正常/无状态关闭）与传输类错误按可重连处理。
+func classifyClose(code int) closeAction {
+	switch code {
+	case 4001, 4002, 4010, 4011, 4012, 4013, 4014, 4914, 4915:
+		return closeTerminal
+	case 4006, 4007, 4900, 4901, 4902, 4903, 4904, 4905, 4906, 4907, 4908, 4909, 4910, 4911, 4912, 4913:
+		return closeResumeForbidden
+	default:
+		return closeReconnect
+	}
+}
 
 // Session 是可持久化的会话状态（用于 Resume）。
 type Session struct {
@@ -98,7 +163,7 @@ func New(opts Options) (*Transport, error) {
 		return nil, fmt.Errorf("ws: Token 不能为空")
 	}
 	if opts.Intents == 0 {
-		opts.Intents = 1<<25 | 1<<26
+		opts.Intents = DefaultIntents
 	}
 	if opts.Shard.Count == 0 {
 		opts.Shard = transport.Shard{Index: 0, Count: 1}
@@ -140,6 +205,21 @@ func (t *Transport) Run(ctx context.Context, emit func(*event.Event) error) erro
 			continue // connectOnce 只在 ctx 取消时返回 nil，此处兜底
 		}
 		t.opts.Logger.Warn("ws 连接中断，准备重连", "err", err, "alive", time.Since(started).Round(time.Second))
+		// 关闭码决定"能不能重连、要不要丢 session"：不能把所有断开都当网络抖动，
+		// 否则机器人下架/封禁/ intent 无权限时会无限重连（官方表明确这些不可恢复）。
+		var ce *wsCloseError
+		if errors.As(err, &ce) {
+			switch classifyClose(ce.code) {
+			case closeTerminal:
+				t.opts.Logger.Error("ws 网关以不可恢复关闭码断开，停止重连",
+					"code", ce.code, "text", ce.text)
+				return fmt.Errorf("%w: code=%d text=%q", ErrTerminalClose, ce.code, ce.text)
+			case closeResumeForbidden:
+				t.opts.Logger.Warn("ws 会话不可 Resume，清理 session 后重新 Identify",
+					"code", ce.code, "text", ce.text)
+				t.clearSession(ctx)
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return nil
@@ -219,11 +299,21 @@ func (t *Transport) connectOnce(ctx context.Context, emit func(*event.Event) err
 	defer close(closeDone)
 	defer func() { _ = conn.Close() }()
 
+	// 读帧上限：防异常大帧打爆内存（网关正常事件远小于此）。
+	conn.SetReadLimit(maxFrameBytes)
+
 	var writeMu sync.Mutex
 	write := func(v any) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		return conn.WriteJSON(v)
+		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+		if err := conn.WriteJSON(v); err != nil {
+			// 写失败通常意味着连接已半死：主动关闭以打断读循环，让 Run 立刻走重连，
+			// 而不是等 StaleTimeout（最长 5 分钟）才发现心跳协程已经静默消失。
+			_ = conn.Close()
+			return err
+		}
+		return nil
 	}
 
 	// 1) Hello（op=10）拿心跳间隔。
@@ -235,7 +325,7 @@ func (t *Transport) connectOnce(ctx context.Context, emit func(*event.Event) err
 		} `json:"d"`
 	}
 	if err := conn.ReadJSON(&hello); err != nil {
-		return fmt.Errorf("ws: read hello: %w", err)
+		return readError(err)
 	}
 	if hello.Op != 10 {
 		return fmt.Errorf("ws: 期望 hello(op=10)，实际 op=%d", hello.Op)
@@ -304,7 +394,7 @@ func (t *Transport) connectOnce(ctx context.Context, emit func(*event.Event) err
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(stale))
 		if err := conn.ReadJSON(&frame); err != nil {
-			return fmt.Errorf("ws: read frame: %w", err)
+			return readError(err)
 		}
 		switch frame.Op {
 		case 0: // 事件分发
@@ -354,6 +444,15 @@ func (t *Transport) connectOnce(ctx context.Context, emit func(*event.Event) err
 			continue
 		}
 	}
+}
+
+// readError 把 gorilla 的关闭帧错误归一成带 code 的 wsCloseError（其余保持原样包装）。
+func readError(err error) error {
+	var ce *websocket.CloseError
+	if errors.As(err, &ce) {
+		return &wsCloseError{code: ce.Code, text: ce.Text}
+	}
+	return fmt.Errorf("ws: read frame: %w", err)
 }
 
 // heartbeat 每 interval 发一次 op=1（带最近 seq）。

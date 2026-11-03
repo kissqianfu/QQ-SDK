@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/kissqianfu/QQ-SDK/api"
 	"github.com/kissqianfu/QQ-SDK/token"
 	"github.com/kissqianfu/QQ-SDK/transport"
 )
@@ -35,6 +36,17 @@ type Config struct {
 	// BaseURL / TokenURL 覆盖 REST 与 token 端点（沙箱/测试用）；空 = 官方正式地址。
 	BaseURL  string
 	TokenURL string
+
+	// Quota 是出站主动消息三层配额；nil = 默认口径（群 60 QPM / 单聊 10 QPS /
+	// 单关系 20 QPM / 每目标每日 1000 条）。QuotaConfig.Disable 可整体关闭。
+	//
+	// 放在门面层是为了让直接使用 qqbot.New 的宿主也能调节/关闭配额——
+	// 之前只有裸用 api.New 才能传，门面反而成了"不可配置"。
+	Quota *api.QuotaConfig
+
+	// RetryNonIdempotent 为 true 时，非幂等请求（POST，如发消息）遇到 5xx 或传输层错误
+	// 也自动重试。默认 false：平台可能已处理成功，重发会造成重复消息/重复资源。
+	RetryNonIdempotent bool
 }
 
 // Validate 校验必填项；New 内部会调用。
