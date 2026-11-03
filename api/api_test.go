@@ -265,6 +265,7 @@ func TestSendMarkdownTemplateWithKeyboardTemplateAndEventID(t *testing.T) {
 	})
 	c := newClient(t, srv, token.NewMemory())
 
+	//lint:ignore SA1019 保留废弃模板路径的回归测试：无模板权限的存量 bot 仍可能用到
 	msg := send.NewMarkdownTemplate("65",
 		send.MarkdownParam{Key: "title", Values: []string{"标题"}},
 		send.MarkdownParam{Key: "content", Values: []string{"内容1", "内容2"}},

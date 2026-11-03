@@ -47,13 +47,18 @@ func Parse(raw []byte) (*Event, error) {
 	ev.Scene = sceneOf(env.T)
 	ev.AtMe = env.T == string(GroupAtMessageCreate)
 
-	// event_id 被动回复锚点：官方"从事件最外层的 id 获取"，
-	// 支持事件：INTERACTION_CREATE（取 d.id）、GROUP_ADD_ROBOT、GROUP_MSG_RECEIVE
-	// （后两个 d 里没有 id，取外层）；单聊还支持 C2C_MSG_RECEIVE、FRIEND_ADD。
-	switch ev.Type {
-	case InteractionCreate:
+	// 被动回复锚点：官方口径是"事件最外层的 id"（ws 网关帧 / webhook 信封的 id）。
+	//
+	// ⚠️ 不要用 d.id：互动事件的 d.id 是裸 interaction_id，只用于 PUT /interactions/{id}，
+	// 拿来当 event_id 回复会被平台拒（40034025，实测）。两者语义在 Event 上分开：
+	//   - Event.ID == Event.EventID：外层 id（回复锚点）；
+	//   - Event.InteractionID：裸 interaction_id（互动回应专用）。
+	if SupportsEventIDReply(ev.Type) {
+		ev.EventID = qqtypes.FirstNonEmpty(env.ID, d.ID) // d.ID 仅防御性兜底
+	}
+	if ev.Type == InteractionCreate {
 		// 官方注明 interaction_id 不带 "INTERACTION_CREATE:" 前缀；历史事件出现过带前缀形态，防御性剥掉。
-		ev.EventID = qqtypes.FirstNonEmpty(strings.TrimPrefix(d.ID, "INTERACTION_CREATE:"), env.ID)
+		ev.InteractionID = strings.TrimPrefix(qqtypes.FirstNonEmpty(d.ID, env.ID), "INTERACTION_CREATE:")
 		ev.InteractionType = d.InteractionType
 		if s := sceneFromString(d.sceneString()); s != 0 {
 			ev.Scene = s
@@ -65,15 +70,6 @@ func Parse(raw []byte) (*Event, error) {
 		} else {
 			ev.InteractionUserID = qqtypes.FirstNonEmpty(d.GroupMemberOID, d.UserOpenID)
 		}
-	case GroupAddRobot:
-		ev.EventID = qqtypes.FirstNonEmpty(d.ID, env.ID)
-	case GroupMsgReceive:
-		ev.EventID = qqtypes.FirstNonEmpty(d.ID, env.ID)
-	case C2CMsgReceive, FriendAdd:
-		// 单聊场景官方支持 event_id 回复的事件是 INTERACTION_CREATE / C2C_MSG_RECEIVE /
-		// FRIEND_ADD（群聊是 INTERACTION_CREATE / GROUP_ADD_ROBOT / GROUP_MSG_RECEIVE）。
-		// 都取"事件最外层的 id"；d.id 只是防御性兜底。
-		ev.EventID = qqtypes.FirstNonEmpty(d.ID, env.ID)
 	}
 
 	ev.TargetID = d.targetID(ev.Scene)
@@ -96,8 +92,7 @@ func Parse(raw []byte) (*Event, error) {
 	}
 	// MsgID 只对消息类事件赋值：其他事件（互动/成员/申请…）的 d.id 含义不同，
 	// 混进 MsgID 会被业务误当成被动回复锚点。
-	switch ev.Type {
-	case C2CMessageCreate, GroupAtMessageCreate, GroupMessageCreate:
+	if IsMessageType(ev.Type) {
 		ev.MsgID = d.ID
 	}
 	ev.RefIdx, ev.RefMsgIdx = d.refIdxs()
@@ -475,7 +470,8 @@ func (d dispatchData) joinRequest() *JoinRequest {
 	if d.VerifyInfo != nil {
 		vi := &VerifyInfo{Method: d.VerifyInfo.Method, VerifyMessage: d.VerifyInfo.VerifyMessage}
 		for _, qa := range d.VerifyInfo.ReviewQAList {
-			vi.ReviewQAList = append(vi.ReviewQAList, VerifyQA{Question: qa.Question, Answer: qa.Answer})
+			// verifyQAData 与 VerifyQA 字段完全一致，直接类型转换（避免逐字段抄写）。
+			vi.ReviewQAList = append(vi.ReviewQAList, VerifyQA(qa))
 		}
 		jr.VerifyInfo = vi
 	}
@@ -492,14 +488,8 @@ func (d dispatchData) subscribeResults() []SubscribeResult {
 	}
 	out := make([]SubscribeResult, 0, len(d.Result))
 	for _, r := range d.Result {
-		out = append(out, SubscribeResult{
-			TemplateID:       r.TemplateID,
-			CustomTemplateID: r.CustomTemplateID,
-			Op:               r.Op,
-			SubscribeID:      r.SubscribeID,
-			SubscribeTS:      r.SubscribeTS,
-			UpdateTS:         r.UpdateTS,
-		})
+		// subscribeResultData 与 SubscribeResult 字段完全一致，直接类型转换。
+		out = append(out, SubscribeResult(r))
 	}
 	return out
 }

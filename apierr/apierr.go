@@ -57,6 +57,22 @@ func (e *APIError) IsAuth() bool {
 	return false
 }
 
+// IsAnchorRejected 表示"被动回复锚点被平台明确拒绝、消息**未送达**"，
+// 可以安全地换下一个锚点重发（api.Client.SendReply 用它做降级判断）。
+//
+// 包含：40034024（msg_id 无效/越权）、40034025（event_id 无效）、40034026（event_id 过期）、
+// 40034005（回复消息 msg_id 已过期）、304103（消息 ID 已过期）、40034128（被动回复时间/次数超限）。
+//
+// ⚠️ 刻意**不包含** 40054005（消息被去重）：它表示"同锚点同 msg_seq 已经发送成功"，
+// 应视为成功并停止；换锚点重发会让用户收到两条。
+func (e *APIError) IsAnchorRejected() bool {
+	switch e.Code {
+	case 40034024, 40034025, 40034026, 40034005, 304103, 40034128:
+		return true
+	}
+	return false
+}
+
 // IsRateLimited 表示触发频控（平台错误码或 HTTP 429）。
 // 40034100 是通用消息频控；50002 是流式消息接口的频率限制。
 func (e *APIError) IsRateLimited() bool {

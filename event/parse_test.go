@@ -67,26 +67,30 @@ func TestParseC2C(t *testing.T) {
 	}
 }
 
-func TestParseInteractionSetsEventID(t *testing.T) {
+func TestParseInteractionEventIDIsOuterID(t *testing.T) {
+	// v0.3.3 语义：EventID = 外层信封 id（回复锚点）；InteractionID = 裸 d.id（互动回应用）。
 	raw := `{"id":"EV-3","op":0,"t":"INTERACTION_CREATE","d":{"id":"inter-1","group_openid":"g-1","author":{"member_openid":"m-1"}}}`
 	ev, err := Parse([]byte(raw))
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	if ev.EventID != "inter-1" || ev.Scene != SceneGroup {
-		t.Fatalf("event = %+v", ev)
+	if ev.EventID != "EV-3" || ev.InteractionID != "inter-1" || ev.Scene != SceneGroup {
+		t.Fatalf("event = %+v（EventID 必须是外层 id，InteractionID 才是裸 interaction_id）", ev)
 	}
 }
 
 // 官方注明 interaction_id 不带 "INTERACTION_CREATE:" 前缀；历史事件出现过带前缀形态，须剥掉。
-func TestParseInteractionStripsEventIDPrefix(t *testing.T) {
+func TestParseInteractionStripsInteractionIDPrefix(t *testing.T) {
 	raw := `{"id":"EV-4","op":0,"t":"INTERACTION_CREATE","d":{"id":"INTERACTION_CREATE:inter-9","scene":"c2c","user_openid":"u-1","type":11}}`
 	ev, err := Parse([]byte(raw))
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	if ev.EventID != "inter-9" {
-		t.Fatalf("EventID = %q, want inter-9", ev.EventID)
+	if ev.InteractionID != "inter-9" {
+		t.Fatalf("InteractionID = %q, want inter-9", ev.InteractionID)
+	}
+	if ev.EventID != "EV-4" {
+		t.Fatalf("EventID = %q, want 外层 id EV-4", ev.EventID)
 	}
 	if ev.Scene != SceneC2C {
 		t.Fatalf("Scene = %v, want c2c", ev.Scene)
@@ -185,7 +189,7 @@ func TestParseInteractionSceneAndType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse(group) error = %v", err)
 	}
-	if ev.Scene != SceneGroup || ev.TargetID != "g-9" || ev.EventID != "it-g" || ev.InteractionType != 11 {
+	if ev.Scene != SceneGroup || ev.TargetID != "g-9" || ev.EventID != "EV-8" || ev.InteractionID != "it-g" || ev.InteractionType != 11 {
 		t.Fatalf("group interaction = %+v", ev)
 	}
 
@@ -199,15 +203,16 @@ func TestParseInteractionSceneAndType(t *testing.T) {
 	}
 }
 
-// 历史 d.id 存在时优先取 d.id（firstNonEmpty），官方现行事件体没有 id 则回退外层 id。
-func TestParseGroupAddRobotEventIDFallback(t *testing.T) {
+// event_id 回复锚点一律取外层信封 id（官方："从事件最外层的 id 获取"）；
+// 历史事件体里的 d.id 只是防御性兜底，不能盖过外层 id。
+func TestParseGroupAddRobotUsesOuterEventID(t *testing.T) {
 	raw := `{"id":"EV-4","op":0,"t":"GROUP_ADD_ROBOT","d":{"id":"add-1","group_openid":"g-1","op_member_openid":"m-1"}}`
 	ev, err := Parse([]byte(raw))
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	if ev.EventID != "add-1" || ev.TargetID != "g-1" {
-		t.Fatalf("event = %+v", ev)
+	if ev.EventID != "EV-4" || ev.TargetID != "g-1" {
+		t.Fatalf("event = %+v（want EventID=EV-4 外层 id）", ev)
 	}
 }
 

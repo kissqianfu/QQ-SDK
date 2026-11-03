@@ -42,6 +42,25 @@ func TestIsAuth(t *testing.T) {
 	}
 }
 
+func TestIsAnchorRejected(t *testing.T) {
+	// 锚点被拒（未送达）→ 可安全降级。
+	for _, code := range []int{40034024, 40034025, 40034026, 40034005, 304103, 40034128} {
+		if !(&APIError{Code: code}).IsAnchorRejected() {
+			t.Errorf("%d 应判为锚点被拒（可降级）", code)
+		}
+	}
+	// 40054005 是"已发送成功被去重"，绝不能降级重发。
+	if (&APIError{Code: 40054005}).IsAnchorRejected() {
+		t.Fatal("40054005 是已送达去重，不应判为锚点被拒")
+	}
+	// 频控/内容错误换锚点也没用。
+	for _, code := range []int{40034100, 40034006, 40054007} {
+		if (&APIError{Code: code}).IsAnchorRejected() {
+			t.Errorf("%d 不应判为锚点被拒", code)
+		}
+	}
+}
+
 func TestIsRateLimited(t *testing.T) {
 	if !(&APIError{Code: 40034100}).IsRateLimited() {
 		t.Fatal("40034100 应判为频控")

@@ -125,13 +125,41 @@ mux.Handle("/callback", h)
 for ev := range c.Events() {
     if ev.Type == event.InteractionCreate && (ev.InteractionType == 11 || ev.InteractionType == 12) {
         // ev.InteractionType: 11=消息按钮 12=快捷菜单（13/14/... 无需回应）
-        _ = c.Sender().Interact(ctx, ev.EventID, api.InteractOK)
-        // 业务处理后用 event_id 锚点回复：
-        _, _ = c.Sender().Send(ctx, api.Target{Scene: ev.Scene, ID: ev.TargetID},
-            send.Text("收到").ReplyToEvent(ev.ID, 1))
+        // 互动回应要的是**裸 interaction_id**（ev.InteractionID），不是外层事件 id。
+        _ = c.Sender().Interact(ctx, ev.InteractionID, api.InteractOK)
+        // 顺手回一条消息：用 SDK 的锚点降级链（外层 event_id → 按钮消息 msg_id）。
+        _, _ = c.Sender().SendReply(ctx, api.Target{Scene: ev.Scene, ID: ev.TargetID}, ev,
+            func() *send.Message { return send.Text("收到") }, api.ReplyOptions{Seq: seqs})
     }
 }
 ```
+
+> ⚠️ **v0.3.3 语义变更（BREAKING）**：`Event.EventID` 现在是**外层事件 id**（被动回复锚点）；
+> 互动回应用的裸 id 移到新字段 `Event.InteractionID`。升级后要把
+> `Interact(ctx, ev.EventID, ...)` 改成 `Interact(ctx, ev.InteractionID, ...)`。
+
+## 被动回复锚点（v0.3.3）
+
+平台有两个都叫 "id" 的字段，用错会得到 `40034025`：
+
+| 字段 | 是什么 | 用途 |
+|---|---|---|
+| `ev.ID` / `ev.EventID` | 事件**外层信封** id | 发送接口的 `event_id` 锚点（`ReplyToEvent`） |
+| `ev.MsgID` | 消息事件 `d.id` | 发送接口的 `msg_id` 锚点（`ReplyTo`） |
+| `ev.InteractionID` | 互动事件裸 interaction_id | 只能用于 `Interact`（`PUT /interactions/{id}`） |
+| `ev.Interaction.MessageID` | 被点按钮所在消息 id | 互动回复的 `msg_id` 兜底锚点 |
+
+不想自己编排"先试哪个、被拒换哪个"时，用 `SendReply`：
+
+```go
+// 按事件类型自动选锚点；仅"锚点被拒"（40034024/25/26/40034005/304103/40034128）降级；
+// 40054005（去重=已送达）直接当成功返回，绝不重发；其它错误立即返回。
+res, err := c.Sender().SendReply(ctx, target, ev,
+    func() *send.Message { return send.Markdown("收到") }, // 每轮都会调用，返回全新消息
+    api.ReplyOptions{Seq: send.NewMemorySeq()})
+```
+
+只想拿候选锚点、自己发送：`ev.ReplyAnchors()`（纯函数，返回 `[]event.Anchor`，无 IO）。
 
 ## 发送消息
 
@@ -176,8 +204,8 @@ Markdown 还可以打开图片转存强校验（转存失败就报错而不是�
 
 ### 被动回复 msg_seq 取号（v0.3.1）
 
-平台按「锚点 + `msg_seq`」判重，重复会返回 40054005，而它会被 `IsDuplicate()` 当成功 —
-**用户什么都没收到，调用方以为成功**。所以同一 `msg_id` 多次回复必须递增 seq：
+平台按「锚点 + `msg_seq`」判重：同一锚点沿用同一个 seq 再回复，平台会返回 40054005
+并**丢弃这次内容**，而 `IsDuplicate()` 会当成功——你以为发了，用户没收到这条新内容。所以多次回复必须递增 seq：
 
 ```go
 seqs := send.NewMemorySeq()                    // 进程内实现；跨重启单调请自实现 SeqAllocator
@@ -187,6 +215,7 @@ msg, err  = send.Text("收到").ReplyToEventWithSeq(ctx, seqs, ev.EventID)   // 
 ```
 
 两类锚点分别计数（不能共用）；`NewMemorySeq` 重启归零，生产跨重启场景请注入 DB/Redis 实现。
+用 `SendReply` 时它会按**当前尝试的锚点**分别取号，不需要自己算。
 
 ## 出站主动消息配额（三层）
 

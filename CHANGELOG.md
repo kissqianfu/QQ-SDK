@@ -2,6 +2,37 @@
 
 对接入方（aichat 等主项目）：每次升级先看「接入方影响」小节；格式参考 Keep a Changelog。
 
+## v0.3.3（2026-11-04）— 被动回复锚点语义修正（BREAKING）+ 自动降级
+
+### 修复（BREAKING）
+
+- **`Event.EventID` 语义修正**：以前互动事件把**裸 interaction_id**（`d.id`）填进 `EventID`，
+  但发送接口的 `event_id` 要求"事件最外层的 id"——拿裸 id 回复会被平台拒（40034025，线上实测）。
+  现在：
+  - `Event.EventID` = **外层信封 id**（= `Event.ID`，被动回复锚点）；
+  - 新增 `Event.InteractionID` = 裸 interaction_id（**只用于 `Interact` / `PUT /interactions/{id}`**）；
+  - **升级动作**：所有 `Interact(ctx, ev.EventID, ...)` 改为 `Interact(ctx, ev.InteractionID, ...)`。
+    用 `ReplyToEvent(ev.EventID)` / `SendReply` 回复的代码不用改（语义变正确了）。
+
+### 新增
+
+- **`api.Client.SendReply`**（`api/reply.go`）：按事件自动选锚点并发送被动回复，锚点被拒时降级。
+  - 规则：消息事件用 `msg_id`；互动事件 `外层 event_id → 按钮消息 msg_id`；其它支持事件用 `event_id`；
+  - 只在 `apierr.IsAnchorRejected()` 时换锚点；`IsDuplicate()`（40054005）**当成功返回、绝不重发**；
+  - `build func() *send.Message` 每轮新建消息；`ReplyOptions.Seq` 按锚点分别取号。
+- **`event.Event.ReplyAnchors()`**（`event/anchor.go`）：纯函数返回候选锚点；配套
+  `IsMessageType` / `SupportsEventIDReply` 收敛"哪类事件用哪种锚点"的协议知识。
+- **`apierr.APIError.IsAnchorRejected()`**：40034024/25/26/40034005/304103/40034128；
+  明确排除 40054005（已送达去重）。
+
+### 接入方影响
+
+- **BREAKING**：互动事件 `Event.EventID` 语义从"裸 interaction_id"改为"外层事件 id"。
+  只影响**用 `EventID` 调 `Interact`** 的代码（README 旧示例就是这么写的），改一行即可。
+- 新增 API 均为可选；`ReplyToEvent(ev.EventID)` 行为变得更正确（此前互动事件会失败）。
+- 未验证项：**webhook 模式外层信封 id 的形态、单聊互动**是否与 ws 群聊同规则，
+  升级后建议各点一次按钮抓 40034025/成功日志确认。
+
 ## v0.3.2（2026-11-03）— 门面内置双通道（Mode）+ 分页/工具收敛
 
 ### 新增（Feature）

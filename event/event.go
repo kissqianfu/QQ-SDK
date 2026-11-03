@@ -114,13 +114,21 @@ type Part struct {
 
 // Event 是归一化后的入站事件。
 type Event struct {
-	ID         string // 平台事件 id（幂等键）
-	Type       Type
-	Scene      Scene
-	TargetID   string // group_openid / user_openid
-	Sender     Sender
-	MsgID      string // 被动回复锚点
-	EventID    string // 被动回复锚点（event_id）：INTERACTION_CREATE / C2C_MSG_RECEIVE / FRIEND_ADD / GROUP_ADD_ROBOT / GROUP_MSG_RECEIVE
+	// ID 是平台事件**外层信封** id（幂等键，也是所有支持事件被动回复的 event_id 锚点）。
+	ID       string
+	Type     Type
+	Scene    Scene
+	TargetID string // group_openid / user_openid
+	Sender   Sender
+	// MsgID 是消息事件的被动回复锚点（事件体 d.id，仅 *_MESSAGE_CREATE 有值）。
+	MsgID string
+	// EventID 是用 event_id 做被动回复的锚点：**恒等于外层信封 ID**（官方口径"从事件最外层 id 获取"），
+	// 只有平台支持 event_id 回复的事件才非空：INTERACTION_CREATE / C2C_MSG_RECEIVE / FRIEND_ADD /
+	// GROUP_ADD_ROBOT / GROUP_MSG_RECEIVE。
+	//
+	// ⚠️ v0.3.3 起语义修正：互动事件以前这里放的是裸 interaction_id（错误，回复会 40034025），
+	// 现在裸 id 移到 InteractionID，本字段改为外层 id。要回复互动事件请用本字段（或 ev.ID）。
+	EventID    string
 	AtMe       bool
 	Parts      []Part
 	RefIdx     string // 引用回复用：MessageScene.ext 的 msg_idx（机器人引用他人消息时传给 send.Message.Reference）
@@ -143,6 +151,11 @@ type Event struct {
 	// Interaction 是 INTERACTION_CREATE 的 data.resolved（按钮 id/data、反馈选项、授权范围等）；
 	// 非互动事件为 nil。
 	Interaction *InteractionData
+
+	// InteractionID 是**裸 interaction_id**（事件体 d.id，已剥 "INTERACTION_CREATE:" 前缀），
+	// 只用于 PUT /interactions/{id} 回应互动；**不能**当消息被动回复的 event_id（会 40034025）。
+	// 回复互动事件请用 EventID（外层 id），或直接 event.ReplyAnchors()。
+	InteractionID string
 
 	// InteractionUserID 是互动事件的操作人 openid（resolved.user_id → group_member_openid → user_openid）。
 	//

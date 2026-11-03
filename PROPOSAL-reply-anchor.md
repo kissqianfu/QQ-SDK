@@ -1,5 +1,16 @@
 # 提案：被动回复锚点降级链（群聊互动 event_id 实测无效）
 
+> **实施状态（2026-11-04，v0.3.3）**：已按修正版落地。与原文的差异以实现为准：
+> 1. 方案 A 移到 **`api.Client.SendReply`**——`send` 是纯构造包、不做 IO，放 send 会与 api 成环；
+> 2. 消息用 `build func() *send.Message` **每轮新建**；`msg_seq` 用 `send.SeqAllocator` **按候选锚点分别取号**；
+> 3. **`40054005`（去重）当成功返回、绝不换锚点重发**（原文与 AlertBot 旧实现把它算降级，会重复发消息）；
+> 4. 事件语义修正（**BREAKING**）：`Event.EventID` = 外层事件 id（锚点）；新增
+>    `Event.InteractionID` = 裸 interaction_id（`Interact` 用）；
+> 5. 新增 `Event.ReplyAnchors()`（纯函数候选链）与 `apierr.IsAnchorRejected()`；
+> 6. 未验证项：webhook 模式外层信封 id 形态、单聊互动是否与 ws 群聊同规则，需真机各点一次按钮确认。
+>
+> 原文保留作设计背景。
+
 > 来源：AlertBot 群聊按钮回调实践（2026-11-04）。目标：宿主不再自己拼
 > "哪个 id 能当回复锚点"的候选链与降级逻辑。
 > **全部为新增 API，零值完全兼容现状，非 BREAKING**；取舍权在 SDK 维护者。
