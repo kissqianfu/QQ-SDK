@@ -2,6 +2,11 @@
 
 对接入方（aichat 等主项目）：每次升级先看「接入方影响」小节；格式参考 Keep a Changelog。
 
+## 未发版（2026-11-03，文档）— ARK 发送实测结论
+
+- **结论**：v2 群/单聊发送侧**不支持** ARK（结构化卡片）。实测：`msg_type=3 + ark` 返回 200 但客户端收到空白消息；`text/markdown` 混发 `ark` 时 `ark` 被静默忽略。与 `type/overview.html` 的「发 ❌ / 收 ✅」一致，`ark.html` 的发送示例为历史遗留。
+- **处置**：SDK 不新增 `send.Ark`，只在 README 写明"只支持接收 `ev.Ark`，需要卡片用 `send.NewCard`（msg_type=8）"，避免后续照 ark 页重复踩坑。**无代码变更**。
+
 ## 未发版（2026-11-03）— 对照 api-v2 文档的审计修复（建议发 v0.3.0）
 
 ### 修复（P0）

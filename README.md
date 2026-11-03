@@ -201,6 +201,16 @@ res, _ := c.Sender().UploadFileDetail(ctx, event.SceneGroup, groupOpenID, imageU
 _, _ = c.Sender().Send(ctx, api.Target{Scene: event.SceneGroup, ID: groupOpenID}, send.Media(fileInfo))
 ```
 
+## ARK（结构化卡片）：v2 只支持接收，不支持发送
+
+> **实测结论（2026-11-03，真实机器人 + 真实群）**：官方 `server-inter/message/type/ark.html`
+> 给的发送结构在 v2 群/单聊接口上**不生效**：`msg_type=3 + ark` 返回 200 但客户端收到的是
+> **空消息**；`text/markdown` 混发 `ark` 时 `ark` 被静默忽略、只渲染文本。
+> 这与 `type/overview.html` 的「结构化卡片 发 ❌ / 收 ✅」一致——ark 页里的发送示例是历史遗留。
+>
+> 因此 SDK **不提供** `send.Ark`：只解析接收侧（`ev.Ark`，见「消息事件结构化字段」）。
+> 需要卡片形态时请用**图文卡片 `send.NewCard`（msg_type=8）**。
+
 ## 单聊流式回复（打字机效果）
 
 平台仅**单聊**支持流式（群聊无此接口，传群 Target 会直接报错）。原理：多次 `POST /stream_messages`，服务端按分片合并；`input_state` 1=生成中、10=结束。
