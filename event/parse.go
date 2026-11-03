@@ -61,6 +61,9 @@ func Parse(raw []byte) (*Event, error) {
 		ev.GroupMemberOpenID = d.GroupMemberOID
 		if d.Data != nil && d.Data.Resolved != nil {
 			ev.Interaction = d.Data.Resolved.model()
+			ev.InteractionUserID = firstNonEmpty(d.Data.Resolved.UserID, d.GroupMemberOID, d.UserOpenID)
+		} else {
+			ev.InteractionUserID = firstNonEmpty(d.GroupMemberOID, d.UserOpenID)
 		}
 	case GroupAddRobot:
 		ev.EventID = firstNonEmpty(d.ID, env.ID)
@@ -84,8 +87,9 @@ func Parse(raw []byte) (*Event, error) {
 	}
 	// FRIEND_ADD/DEL 的 author 只有 union_openid，用户 openid 在顶层 d.openid。
 	// GROUP_MEMBER_ADD/REMOVE / GROUP_JOIN_REQUEST 的成员 openid 在 d.member_openid。
+	// INTERACTION_CREATE 没有 author：群场景在 d.group_member_openid，单聊在 d.user_openid。
 	if ev.Sender.ID == "" {
-		ev.Sender.ID = firstNonEmpty(d.OpenID, d.MemberOpenID, d.GroupMemberOID)
+		ev.Sender.ID = firstNonEmpty(d.OpenID, d.MemberOpenID, d.GroupMemberOID, d.UserOpenID)
 	}
 	if ev.TargetID == "" && ev.Scene == SceneC2C {
 		ev.TargetID = d.OpenID

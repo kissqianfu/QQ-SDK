@@ -35,8 +35,9 @@ const (
 	defaultSingleQPS   = 10
 	defaultRelationQPM = 20
 	defaultDailyLimit  = 1000
-	// keyCap 是单关系桶与日计数表的键上限：防止被大量不同 openid 撑爆内存。
-	// 超出后按先进先出淘汰最老的键——被淘汰的关系等于"额度重新开始"，可接受。
+	// keyCap 是单关系桶与日计数表的**默认**键上限（QuotaConfig.KeyCap 可覆盖）：
+	// 防止被大量不同 openid 撑爆内存。超出后按先进先出淘汰最老的键——
+	// 被淘汰的关系等于"额度重新开始"，可接受。
 	keyCap = 4096
 )
 
@@ -53,6 +54,9 @@ type QuotaConfig struct {
 	RelationQPM    int            // 单关系：每分钟条数（默认 20）
 	DailyPerTarget int            // 每目标每日上限（默认 1000）
 	Location       *time.Location // 日界时区（默认 UTC+8）
+	// KeyCap 是单关系桶/日计数表的键上限（默认 4096）。
+	// 超出按 FIFO 淘汰最老的键——被淘汰目标的额度相当于"重新开始"，这是 best-effort 的取舍。
+	KeyCap int
 	// Now 可注入，测试用来推进时间/跨日；nil 用 time.Now。
 	Now func() time.Time
 }
@@ -70,6 +74,9 @@ func (c QuotaConfig) normalize() QuotaConfig {
 	}
 	if c.DailyPerTarget == 0 {
 		c.DailyPerTarget = defaultDailyLimit
+	}
+	if c.KeyCap == 0 {
+		c.KeyCap = keyCap
 	}
 	if c.Location == nil {
 		c.Location = quotaLocation
@@ -140,7 +147,8 @@ func (b *bucket) refund(now time.Time) {
 
 // quota 是三层配额的运行时状态。
 type quota struct {
-	cfg QuotaConfig
+	cfg    QuotaConfig
+	keyCap int
 
 	mu        sync.Mutex
 	group     *bucket
@@ -164,6 +172,7 @@ func newQuota(cfg *QuotaConfig) *quota {
 	now := c.Now()
 	q := &quota{
 		cfg:       c,
+		keyCap:    c.KeyCap,
 		relations: make(map[string]*bucket),
 		daily:     make(map[string]int),
 		dailyDay:  dayOf(now, c.Location),
@@ -250,6 +259,37 @@ func (q *quota) noteSent(targetID string) {
 	q.noteDaily(targetID)
 }
 
+// refund 退回一次"确定没送达"的主动消息所占用的**令牌**（日计数不在这里处理：
+// 日上限只在发送成功后才 +1，失败本来就没占）。
+//
+// 调用时机（与 Send 的失败矩阵一致）：Token 失败、网络错误、5xx、429、4xx 都要退；
+// HTTP 2xx 之后（哪怕 parseSendResult 失败）**不退**——那条消息平台已接受。
+//
+// 为什么要退：宿主的持久化队列失败后会改期重入队，重发会再次 acquire；
+// 不退的话一次失败白烧两份额度，长期把本地配额算得比平台更紧。
+func (q *quota) refund(scene event.Scene, targetID string) {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	now := q.cfg.Now()
+	if scene == event.SceneGroup {
+		if q.group != nil {
+			q.group.refund(now)
+		}
+	} else {
+		if q.single != nil {
+			q.single.refund(now)
+		}
+	}
+	// 单关系桶只在已存在时退（不为了退款新建一个桶）。
+	if b, ok := q.relations[targetID]; ok {
+		b.refund(now)
+	}
+}
+
 // relationBucket 取（必要时创建）某个目标的桶；键表满时淘汰最老的键。
 func (q *quota) relationBucket(id string, now time.Time) *bucket {
 	if q.cfg.RelationQPM <= 0 {
@@ -258,7 +298,7 @@ func (q *quota) relationBucket(id string, now time.Time) *bucket {
 	if b, ok := q.relations[id]; ok {
 		return b
 	}
-	if len(q.relations) >= keyCap {
+	if len(q.relations) >= q.keyCap {
 		q.relOrder = evictOne(q.relations, q.relOrder)
 	}
 	b := newBucket(float64(q.cfg.RelationQPM)/60, float64(q.cfg.RelationQPM), now)
@@ -270,7 +310,7 @@ func (q *quota) relationBucket(id string, now time.Time) *bucket {
 // noteDaily 记一次当日成功发送（调用前已确认过日上限）。
 func (q *quota) noteDaily(id string) {
 	if _, ok := q.daily[id]; !ok {
-		if len(q.daily) >= keyCap {
+		if len(q.daily) >= q.keyCap {
 			q.dailyKeys = evictOne(q.daily, q.dailyKeys)
 		}
 		q.dailyKeys = append(q.dailyKeys, id)

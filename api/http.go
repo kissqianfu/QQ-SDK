@@ -28,11 +28,11 @@ const (
 	userAgent = "qqbot-sdk/1.0"
 	// maxBody 限制响应体读取，防异常大响应打爆内存。
 	maxBody = 4 << 20
-	// maxAttempts 是 REST 重试次数（仅 429/5xx/网络错误）。
+	// maxAttempts 是默认 REST 重试次数（Config.Retry 可覆盖）。
 	maxAttempts = 3
-	// retryBase 是重试退避基数。
+	// retryBase 是默认重试退避基数。
 	retryBase = 100 * time.Millisecond
-	// maxRetryAfter 是 429 Retry-After 的等待上限（防异常头打挂调用方）。
+	// maxRetryAfter 是 429 Retry-After 的默认等待上限（防异常头打挂调用方）。
 	maxRetryAfter = 30 * time.Second
 )
 
@@ -58,12 +58,12 @@ func waitCtx(ctx context.Context, d time.Duration) error {
 func (c *Client) runWithRetry(ctx context.Context, fn func(attempt int) (retryable bool, retryAfter time.Duration, err error)) error {
 	var lastErr error
 	var retryAfter time.Duration
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	for attempt := 1; attempt <= c.retryAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if attempt > 1 {
-			delay := retryBase * time.Duration(attempt-1)
+			delay := c.retryBase * time.Duration(attempt-1)
 			if retryAfter > 0 {
 				// 服务器明确给了等待时长就精确遵守，不加抖动。
 				delay = retryAfter
@@ -219,13 +219,15 @@ func (c *Client) once(ctx context.Context, method, url, tok string, payload []by
 	if len(body) > maxBody {
 		return nil, fmt.Errorf("%w: 超过 %d 字节", errBodyTooLarge, maxBody)
 	}
-	return &httpResult{status: resp.StatusCode, body: body, retryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}, nil
+	return &httpResult{status: resp.StatusCode, body: body, retryAfter: parseRetryAfterLimit(resp.Header.Get("Retry-After"), c.maxRetryAfter)}, nil
 }
 
-// parseRetryAfter 解析 Retry-After；支持"秒数"与 HTTP-date 两种合法形态
-// （RFC 9110 两种都允许，平台历史上用过秒数）。
-// 非法或超上限时按上限/0 处理。
-func parseRetryAfter(raw string) time.Duration {
+// parseRetryAfter 解析 Retry-After（默认上限），供测试与默认配置使用。
+func parseRetryAfter(raw string) time.Duration { return parseRetryAfterLimit(raw, maxRetryAfter) }
+
+// parseRetryAfterLimit 解析 Retry-After；支持"秒数"与 HTTP-date 两种合法形态
+// （RFC 9110 两种都允许，平台历史上用过秒数）。非法返回 0；超过 max 按 max 处理。
+func parseRetryAfterLimit(raw string, max time.Duration) time.Duration {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return 0
@@ -244,8 +246,8 @@ func parseRetryAfter(raw string) time.Duration {
 	} else {
 		return 0
 	}
-	if d > maxRetryAfter {
-		return maxRetryAfter
+	if max > 0 && d > max {
+		return max
 	}
 	return d
 }

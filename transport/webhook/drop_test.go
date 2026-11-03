@@ -67,5 +67,17 @@ func TestQueueFullCallsOnDrop(t *testing.T) {
 	if h.Dropped() < 1 {
 		t.Fatalf("Dropped() = %d，want >=1", h.Dropped())
 	}
+	// 按类型统计：按钮回调被丢和普通事件被丢的严重程度不同，必须能区分。
+	byType := h.DroppedByType()
+	if byType["FRIEND_ADD"] < 1 {
+		t.Fatalf("DroppedByType() = %v，want FRIEND_ADD>=1", byType)
+	}
+	var sum int64
+	for _, n := range byType {
+		sum += n
+	}
+	if sum != h.Dropped() {
+		t.Fatalf("分类型合计 %d != Dropped() %d", sum, h.Dropped())
+	}
 	close(block)
 }

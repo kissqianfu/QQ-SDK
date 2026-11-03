@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kissqianfu/QQ-SDK/event"
 	"github.com/kissqianfu/QQ-SDK/qqtypes"
@@ -33,6 +34,9 @@ func (c *Client) Send(ctx context.Context, target Target, msg *send.Message) (*R
 	if err := msg.Validate(); err != nil {
 		return nil, err
 	}
+	if err := c.checkContentLen(msg); err != nil {
+		return nil, err
+	}
 	path, err := messagePath(target)
 	if err != nil {
 		return nil, err
@@ -45,10 +49,22 @@ func (c *Client) Send(ctx context.Context, target Target, msg *send.Message) (*R
 	//
 	// ⚠️ 位置刻意放在 Token() 之前：本地配额拒绝时连 token 都不必刷新，
 	//    绝不触达平台——否则"本地限流是为了省平台额度"这句话就不成立。
-	if isActiveMessage(msg) {
+	active := isActiveMessage(msg)
+	if active {
 		if err := c.quota.acquire(target.Scene, target.ID); err != nil {
 			return nil, err
 		}
+	}
+	// delivered 标记"平台已接受（HTTP 2xx）"。失败矩阵：
+	//   - Token 失败 / 网络错误 / 5xx / 429 / 4xx → 未送达 → 退令牌；
+	//   - do 成功（含 parseSendResult 失败）→ 已送达 → 不退，也不重发。
+	delivered := false
+	if active {
+		defer func() {
+			if !delivered {
+				c.quota.refund(target.Scene, target.ID)
+			}
+		}()
 	}
 	tok, err := c.Token(ctx)
 	if err != nil {
@@ -58,15 +74,33 @@ func (c *Client) Send(ctx context.Context, target Target, msg *send.Message) (*R
 	if err != nil {
 		return nil, err
 	}
+	delivered = true
 	res, err := parseSendResult(raw)
 	if err != nil {
 		return nil, err
 	}
 	// 日上限只统计真正发出去的主动消息（失败不占额度）。
-	if isActiveMessage(msg) {
+	if active {
 		c.quota.noteSent(target.ID)
 	}
 	return res, nil
+}
+
+// checkContentLen 在本地拦下超长正文（Config.MaxContentLen，0 = 不校验）。
+// 平台对超长正文返回 40054007，提前拦截可省一次往返和一次平台侧扣额。
+func (c *Client) checkContentLen(msg *send.Message) error {
+	if c.maxContentLen <= 0 {
+		return nil
+	}
+	switch msg.Kind() {
+	case send.KindText, send.KindMarkdown:
+	default:
+		return nil
+	}
+	if n := utf8.RuneCountInString(msg.Content()); n > c.maxContentLen {
+		return fmt.Errorf("api: 正文 %d 字符超过本地上限 %d（Config.MaxContentLen）", n, c.maxContentLen)
+	}
+	return nil
 }
 
 // isActiveMessage 判断是否为主动消息：既没有 msg_id 也没有 event_id 锚点。

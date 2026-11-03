@@ -73,6 +73,54 @@ func TestParseInteractionResolved(t *testing.T) {
 	}
 }
 
+// TestParseInteractionSenderC2C 锁定评审发现的缺陷：INTERACTION_CREATE 没有 author，
+// 单聊的操作人只在 d.user_openid 里；Sender.ID / InteractionUserID 必须能拿到，
+// 否则按 Sender.ID 做按钮权限白名单时单聊场景恒为空串（越权/全拒）。
+func TestParseInteractionSenderC2C(t *testing.T) {
+	raw := `{"id":"EV-I2","op":0,"t":"INTERACTION_CREATE","d":{
+		"id":"inter-2","type":11,"scene":"c2c","user_openid":"u-c2c",
+		"data":{"type":11,"resolved":{"button_id":"b1","button_data":"a|act=ack"}}}}`
+	ev, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if ev.Sender.ID != "u-c2c" {
+		t.Fatalf("C2C Sender.ID = %q, want u-c2c", ev.Sender.ID)
+	}
+	if ev.InteractionUserID != "u-c2c" {
+		t.Fatalf("InteractionUserID = %q, want u-c2c", ev.InteractionUserID)
+	}
+	if ev.TargetID != "u-c2c" {
+		t.Fatalf("TargetID = %q", ev.TargetID)
+	}
+	if ev.Interaction == nil || ev.Interaction.ButtonData != "a|act=ack" {
+		t.Fatalf("Interaction = %+v", ev.Interaction)
+	}
+
+	// 群场景：操作人取 group_member_openid。
+	grp := `{"id":"EV-I3","op":0,"t":"INTERACTION_CREATE","d":{
+		"id":"inter-3","type":11,"scene":"group","group_openid":"g1","group_member_openid":"m-1",
+		"data":{"type":11,"resolved":{"button_data":"a|act=mute1h"}}}}`
+	ev2, err := Parse([]byte(grp))
+	if err != nil {
+		t.Fatalf("Parse(group) error = %v", err)
+	}
+	if ev2.Sender.ID != "m-1" || ev2.InteractionUserID != "m-1" || ev2.GroupMemberOpenID != "m-1" {
+		t.Fatalf("group sender = %q/%q/%q", ev2.Sender.ID, ev2.InteractionUserID, ev2.GroupMemberOpenID)
+	}
+	// resolved.user_id 优先（频道场景才有值，这里只验证优先级）。
+	withUID := `{"id":"EV-I4","op":0,"t":"INTERACTION_CREATE","d":{
+		"id":"inter-4","type":11,"scene":"group","group_openid":"g1","group_member_openid":"m-1",
+		"data":{"type":11,"resolved":{"user_id":"uid-x"}}}}`
+	ev3, err := Parse([]byte(withUID))
+	if err != nil {
+		t.Fatalf("Parse(uid) error = %v", err)
+	}
+	if ev3.InteractionUserID != "uid-x" {
+		t.Fatalf("InteractionUserID = %q, want uid-x（resolved.user_id 优先）", ev3.InteractionUserID)
+	}
+}
+
 func TestParseSubscribeMessageStatus(t *testing.T) {
 	raw := `{"id":"EV-S1","op":0,"t":"SUBSCRIBE_MESSAGE_STATUS","d":{
 		"openid":"u1","result":[

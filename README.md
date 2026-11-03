@@ -57,7 +57,10 @@ func mustWS(c *qqbot.Client) transport.Transport {
     tr, err := ws.New(ws.Options{
         AppID: appID,
         Token: c.Sender().Token, // 复用 REST 的 token 缓存
-        // SessionStore: 自选，持久化 session/seq 用于 Resume
+        // SessionStore: 持久化 session/seq 用于 Resume。
+        // 单实例可用 ws.NewMemorySession()（进程内重连可 Resume，重启走 Identify）；
+        // 多实例/要求跨重启 Resume 请自己实现（DB/Redis）。
+        SessionStore: ws.NewMemorySession(),
         // Dedupe: 自选，事件幂等钩子
     })
     if err != nil { panic(err) }
@@ -82,6 +85,7 @@ mux.Handle("/callback", h)
 平台 3s 超时会重推：Handler 先 ACK 再异步回调；op13 URL 校验挑战按官方协议内置。
 `Handler.Close()` 会停止接收（之后新请求返回 503，平台会重推）、关闭队列并等待已入队事件处理完；
 `Options.OnEventTimeout` 给单条处理加超时 ctx；队列满时调 `Options.OnDrop`（ACK 后弃事件不可恢复）；
+`Handler.DroppedByType()` 按事件类型统计丢弃数（按钮回调和普通事件要分开看）。
 
 ## 按钮互动（INTERACTION_CREATE）
 
@@ -140,6 +144,20 @@ Markdown 还可以打开图片转存强校验（转存失败就报错而不是�
 `PermissionType`（1=管理员 / 3=指定身份组，零值自动：有指定对象→0，否则 2=所有人）、
 `SpecifyUserIDs` / `SpecifyRoleIDs`、`Modal`（二次确认）、`Enter` / `Reply`（指令按钮）。
 
+### 被动回复 msg_seq 取号（v0.3.1）
+
+平台按「锚点 + `msg_seq`」判重，重复会返回 40054005，而它会被 `IsDuplicate()` 当成功 —
+**用户什么都没收到，调用方以为成功**。所以同一 `msg_id` 多次回复必须递增 seq：
+
+```go
+seqs := send.NewMemorySeq()                    // 进程内实现；跨重启单调请自实现 SeqAllocator
+
+msg, err := send.Text("收到").ReplyToWithSeq(ctx, seqs, ev.MsgID)          // msg_id 锚点
+msg, err  = send.Text("收到").ReplyToEventWithSeq(ctx, seqs, ev.EventID)   // event_id 锚点
+```
+
+两类锚点分别计数（不能共用）；`NewMemorySeq` 重启归零，生产跨重启场景请注入 DB/Redis 实现。
+
 ## 出站主动消息配额（三层）
 
 `Client.Send` 是所有发送形态的唯一出口，配额就实现在这里，**宿主不需要也不应该再自己计数**：
@@ -170,6 +188,10 @@ c, _ := api.New(api.Config{
 
 > **未认证机器人**：平台对未认证 bot 的额度更低（群 30 qpm；单聊 5 qps 且 30 qpm）。
 > SDK 默认按"已认证"口径（60/10），未认证宿主请显式调小，否则本地放行但平台会 429。
+
+> **失败退款（v0.3.1）**：主动消息在平台接受之前失败（Token/网络/5xx/429/4xx）会退回令牌，
+> 宿主的持久化队列改期重发不会双重扣额；日上限本来就只统计成功发送。
+> 键上限 `QuotaConfig.KeyCap` 可配（默认 4096），超出按 FIFO 淘汰最老目标。
 
 - **被动回复不计入**：带 `msg_id`（`ReplyTo`）或 `event_id`（`ReplyToEvent`）的消息直接放行。
 - **被本地拒绝时不会调用平台**：判定发生在取 token/发请求之前，这才真的省额度。
@@ -376,10 +398,16 @@ ev.Elements // []event.MessageElement：msg_elements（message_type=103 引用�
 ev.Timestamp        // 平台事件时间（ReceivedAt 是历史字段，取同一值）
 ev.JoinRequest      // GROUP_JOIN_REQUEST：JoinRequestID / ApplySource / VerifyInfo / AutoApprovedStrategyID
 ev.Interaction      // INTERACTION_CREATE 的 data.resolved：ButtonID / ButtonData / FeedbackOpt / AuthorizeData
+ev.InteractionUserID // INTERACTION_CREATE 的操作人 openid（resolved.user_id → group_member_openid → user_openid）
 ev.SubscribeResults // SUBSCRIBE_MESSAGE_STATUS：TemplateID / Op / SubscribeID ...
 ev.FriendScene      // FRIEND_ADD 的场景值（1000/1001/...）
 ev.SceneParam       // FRIEND_ADD 的 callback_data（配合 GenerateURLLink 做邀请来源归因）
 ```
+
+> **按钮权限白名单**：`INTERACTION_CREATE` 的事件体**没有 author**。群场景操作人在
+> `d.group_member_openid`，单聊在 `d.user_openid`——SDK 已把它们填进 `ev.Sender.ID` 与
+> `ev.InteractionUserID`。**不要**用 `ev.Interaction.UserID` 做鉴权（官方标注它"仅频道场景有值"）。
+> 单聊场景若 `ev.Sender.ID` 为空，说明你在用 v0.3.0 及更早版本，升级到 v0.3.1+。
 
 > INTENT：WS 默认订阅 `GROUP_MEMBER_EVENT(1<<24) | GROUP_AND_C2C_EVENT(1<<25) | INTERACTION(1<<26)`
 > （2026-11-03 起包含群成员/入群申请事件）。若机器人未被平台授予群成员事件权限，
@@ -391,12 +419,19 @@ ev.SceneParam       // FRIEND_ADD 的 callback_data（配合 GenerateURLLink 做
 
 ## 重试与生命周期（v0.3.0 起）
 
-- **网络错误 / 429**：自动重试（上限 3 次，指数退避 + 0~20% 抖动；429 优先用 `Retry-After`，
+- **网络错误 / 429**：自动重试（默认上限 3 次，指数退避 + 0~20% 抖动；429 优先用 `Retry-After`，
   且服务器给了等待时长时精确遵守不加抖动）。
+- **重试可配**（v0.3.1）：`api.Config{Retry: &api.RetryConfig{MaxAttempts: -1}}` 关闭 SDK 内重试
+  （交给宿主的持久化队列），`=1` 只试一次，`=0`/nil 默认 3 次；`Base` / `MaxRetryAfter` 也可调。
+  门面 `qqbot.Config.Retry` 同样可用。
 - **5xx**：只对幂等方法（GET/PUT/DELETE）自动重试；**非幂等 POST 默认不重发**（平台可能已处理，
   重发会重复发消息）。要恢复旧行为：`api.Config{RetryNonIdempotent: true}`。
 - **响应体上限 4MB**：超限返回明确错误（不再静默截断成"JSON 解析失败"）。
+- **正文长度**（v0.3.1）：`api.Config{MaxContentLen: 3500}` 在本地拦超长文本/Markdown，
+  不发请求、不扣额度；默认 0 = 不校验。
 - **配额日上限只计成功发送**：平台拒绝/超时/ctx 取消不占当日额度（否则一轮故障能打光当天额度）。
+- **配额令牌失败退回**（v0.3.1）：主动消息在"平台接受（HTTP 2xx）之前"失败会退回两层桶令牌；
+  2xx 之后（含响应体解析失败）不退——那条消息平台已收到。
 - **401**：token 存储实现 `token.Deleter`（默认 `token.Memory` 已实现）时，自动作废缓存 →
   换新 token → 重试一次，不再一直失败到 TTL。
 - **WS 关闭码**：`4001/4002/4010~4014/4914/4915` 视为不可恢复，`Run` 返回 `ws.ErrTerminalClose`

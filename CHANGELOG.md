@@ -2,6 +2,41 @@
 
 对接入方（aichat 等主项目）：每次升级先看「接入方影响」小节；格式参考 Keep a Changelog。
 
+## v0.3.1（2026-11-03）— 评审清单落地（互动身份、重试可配、配额退款、seq 取号等）
+
+### 修复
+
+- **C2C 互动事件拿不到操作人**：`INTERACTION_CREATE` 没有 `author`，单聊的操作人只在
+  `d.user_openid`，而 `Event.Sender` 的兜底链漏了它 → 单聊按钮回调 `Sender.ID` 恒为空。
+  按 `Sender.ID` 做按钮白名单时单聊会"全拒或空串放行"。已补兜底链，并新增明确字段
+  `Event.InteractionUserID`（`resolved.user_id → group_member_openid → user_openid`）。
+- **配额令牌失败不退**：主动消息在 `acquire` 后失败（Token/网络/5xx/429/4xx）会白扣两层桶令牌，
+  宿主的持久化队列改期重发会再扣一次。现在 `Send` 用 delivered 标记精确退款：
+  只有"HTTP 2xx 之前"的失败退令牌；2xx 之后（含响应体解析失败）不退——消息平台已接受。
+  日上限仍只统计成功发送（v0.3.0 行为不变）。
+
+### 新增
+
+- **`RetryConfig`**（`api.Config.Retry`，门面 `qqbot.Config.Retry` 同步暴露）：可配
+  `MaxAttempts` / `Base` / `MaxRetryAfter`。`MaxAttempts<0` = 关闭 SDK 内重试（交给宿主队列），
+  `=1` = 只试一次，`=0` = 默认 3 次。默认行为不变。
+- **`Config.MaxContentLen`**（默认 0 = 不校验）：文本/Markdown 正文超限时**本地拒绝**，
+  不发请求、不扣额度，错误信息带 `MaxContentLen` 字样。
+- **`send.SeqAllocator` + `send.NewMemorySeq()`**：被动回复 `msg_seq` 取号接口与内存实现；
+  `Message.ReplyToWithSeq` / `ReplyToEventWithSeq` 取号后自动设置锚点。
+  ⚠️ 内存实现重启归零；跨重启单调请注入自己的 SeqAllocator（DB/Redis）。
+- **`ws.NewMemorySession()`**：单进程 SessionStore，进程内重连可 Resume；重启仍走 Identify。
+- **`QuotaConfig.KeyCap`**：单关系桶/日计数表键上限（默认 4096）。
+- **`webhook.Handler.DroppedByType()`**：按事件类型统计丢弃数（区分按钮回调与普通事件）。
+
+### 接入方影响
+
+- 全部向后兼容：默认行为不变（重试、长度校验、seq 仍由宿主决定）。
+- 若宿主已有持久化发送队列：建议 `Retry: &api.RetryConfig{MaxAttempts: -1}`，避免两层重试叠加。
+- 若宿主自己实现了按钮权限白名单：升级后单聊场景 `ev.Sender.ID` 不再为空，请确认
+  "空 id 放行"的兜底分支可以删掉（否则逻辑仍偏宽）。
+- `send.NewMemorySeq` 只适合单进程/测试；生产跨重启场景需自行实现 `SeqAllocator`。
+
 ## 未发版（2026-11-03，文档）— ARK 发送实测结论
 
 - **结论**：v2 群/单聊发送侧**不支持** ARK（结构化卡片）。实测：`msg_type=3 + ark` 返回 200 但客户端收到空白消息；`text/markdown` 混发 `ark` 时 `ark` 被静默忽略。与 `type/overview.html` 的「发 ❌ / 收 ✅」一致，`ark.html` 的发送示例为历史遗留。

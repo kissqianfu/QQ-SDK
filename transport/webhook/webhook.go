@@ -93,6 +93,9 @@ type Handler struct {
 	closed    bool
 	wg        sync.WaitGroup
 	closeOnce sync.Once
+
+	dropMu    sync.Mutex
+	dropTypes map[string]int64
 }
 
 // seedFromSecret 按官方协议把 Bot Secret repeat 到 32 字节，作为 Ed25519 seed。
@@ -128,11 +131,12 @@ func New(opts Options) (*Handler, error) {
 	}
 	seed := seedFromSecret(opts.Secret)
 	h := &Handler{
-		opts:  opts,
-		key:   ed25519.NewKeyFromSeed(seed),
-		now:   time.Now,
-		queue: make(chan []byte, opts.QueueSize),
-		log:   opts.Logger,
+		opts:      opts,
+		key:       ed25519.NewKeyFromSeed(seed),
+		now:       time.Now,
+		queue:     make(chan []byte, opts.QueueSize),
+		log:       opts.Logger,
+		dropTypes: make(map[string]int64),
 	}
 	if opts.OnEvent != nil {
 		h.wg.Add(opts.Workers)
@@ -167,6 +171,20 @@ func (h *Handler) Acknowledged() int64 { return h.acked.Load() }
 
 // Dropped 返回队列满被丢弃的事件数。
 func (h *Handler) Dropped() int64 { return h.dropped.Load() }
+
+// DroppedByType 返回按事件类型统计的丢弃数（ACK 后队列满/已关闭）。
+//
+// 比 Dropped() 的单一总数更有用：按钮回调（INTERACTION_CREATE）被丢和心跳事件被丢
+// 的严重程度完全不同，告警/指标应能区分。
+func (h *Handler) DroppedByType() map[string]int64 {
+	h.dropMu.Lock()
+	defer h.dropMu.Unlock()
+	out := make(map[string]int64, len(h.dropTypes))
+	for k, v := range h.dropTypes {
+		out[k] = v
+	}
+	return out
+}
 
 // ServeHTTP 实现 http.Handler。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -379,6 +397,13 @@ func (h *Handler) dispatch(body []byte) {
 	}
 	h.log.Warn("webhook 处理队列已满或已关闭，丢弃事件（不可恢复，请调大 QueueSize/Workers 或改异步落库）",
 		"event_id", meta.ID, "type", meta.Type, "dropped_total", h.dropped.Load())
+	h.dropMu.Lock()
+	if meta.Type == "" {
+		h.dropTypes["unknown"]++
+	} else {
+		h.dropTypes[meta.Type]++
+	}
+	h.dropMu.Unlock()
 	if h.opts.OnDrop != nil {
 		h.opts.OnDrop(meta)
 	}

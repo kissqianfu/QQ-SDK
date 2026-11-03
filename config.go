@@ -47,6 +47,13 @@ type Config struct {
 	// RetryNonIdempotent 为 true 时，非幂等请求（POST，如发消息）遇到 5xx 或传输层错误
 	// 也自动重试。默认 false：平台可能已处理成功，重发会造成重复消息/重复资源。
 	RetryNonIdempotent bool
+
+	// Retry 控制 REST 重试；nil = 默认（3 次尝试 / 100ms 基退避 / Retry-After 上限 30s）。
+	// 宿主已有持久化发送队列时，建议 MaxAttempts<0，把重试交给队列调度。
+	Retry *api.RetryConfig
+
+	// MaxContentLen 是文本/Markdown 正文上限（rune 计；0 = 不校验，建议 3500~4000）。
+	MaxContentLen int
 }
 
 // Validate 校验必填项；New 内部会调用。

@@ -144,6 +144,13 @@ type Event struct {
 	// 非互动事件为 nil。
 	Interaction *InteractionData
 
+	// InteractionUserID 是互动事件的操作人 openid（resolved.user_id → group_member_openid → user_openid）。
+	//
+	// ⚠️ INTERACTION_CREATE 的事件体**没有 author**：群场景操作人在 d.group_member_openid，
+	// 单聊在 d.user_openid。做按钮权限白名单时必须用它（或 Sender.ID），
+	// 不要用 ev.Interaction.UserID——那个字段官方标注"仅频道场景有值"。
+	InteractionUserID string
+
 	// Mentions 是消息中 @ 的用户列表（官方 mentions，平台保证不含 @ 机器人自身；仅消息类事件）。
 	Mentions []Sender
 

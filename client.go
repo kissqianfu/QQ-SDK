@@ -45,6 +45,8 @@ func New(cfg Config) (*Client, error) {
 		Quota:     cfg.Quota,
 
 		RetryNonIdempotent: cfg.RetryNonIdempotent,
+		Retry:              cfg.Retry,
+		MaxContentLen:      cfg.MaxContentLen,
 	})
 	if err != nil {
 		return nil, err
