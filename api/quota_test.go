@@ -201,6 +201,8 @@ func TestQuotaKeysBounded(t *testing.T) {
 		if err := q.acquire(event.SceneGroup, id); err != nil {
 			t.Fatalf("第 %d 条应通过: %v", i, err)
 		}
+		// 日计数只在发送成功后记（noteSent），这里模拟成功发送。
+		q.noteSent(id)
 	}
 	if len(q.relations) > keyCap {
 		t.Fatalf("关系表 %d 超过上限 %d", len(q.relations), keyCap)

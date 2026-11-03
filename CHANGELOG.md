@@ -42,6 +42,19 @@
 - **`Run` 返回后再调 `Run` 不再 panic**（历史实现会 `send on closed channel`），现在入口直接返回 nil
 - **门面 `qqbot.Config` 新增 `Quota` / `RetryNonIdempotent`**：以前只有裸用 `api.New` 才能配，门面反而不可配
 
+### 第二轮（残余 P2 收口 + 默认 intents 变更）
+
+- **默认 intents 含群成员事件**：`ws.DefaultIntents` 改为 `1<<24 | 1<<25 | 1<<26`（群成员/入群申请 + 群/单聊消息 + 互动）。
+  未获该能力的机器人订阅 1<<24 会被 4014 断开 → `Run` 返回 `ErrTerminalClose`；需要回退时显式传 `IntentGroupAndC2CEvent|IntentInteraction`。
+- **webhook 生命周期**：新增 `Handler.Close()`（停止接收→503 让平台重推、关队列、等待已入队事件处理完，worker 回收、幂等）；
+  新增 `Options.OnEventTimeout`（单条处理超时 ctx）；`Options.OnDrop` 覆盖"队列满/已关闭"两种丢弃。
+- **响应体超限显式报错**：4MB 上限不再静默截断，返回"响应体超过上限"错误且不重试。
+- **配额日上限只计成功发送**：`acquire` 只查不计数，发送成功后才 `noteSent`；平台 4xx/5xx/ctx 取消不再白占当日额度。
+- **退避加抖动**：自建指数退避加 0~20% 抖动（`Retry-After` 精确值不加），避免多实例同步重试尖峰。
+- **`GET /gateway/bot` 支持**：新增 `ws.Options.GatewayBot`（走 `GatewayEndpoint+"/bot"`，按平台建议分片打 Warn、打印 session 限额）
+  与 `Transport.GatewayBot(ctx)`（宿主可自读 shards / session_start_limit）。
+- **官方示例回归**：用官方文档给出的 appid/secret/plain_token/签名做端到端断言，锁死 seed repeat 与签名内容顺序。
+
 ### 废弃
 
 - `send.NewMarkdownTemplate`：官方已把 `custom_template_id` / `template_id` 标为【已废弃】，新代码请用 `send.Markdown`

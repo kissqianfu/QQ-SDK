@@ -42,16 +42,17 @@ func TestClassifyClose(t *testing.T) {
 	}
 }
 
-func TestDefaultIntentsExcludesGroupMember(t *testing.T) {
-	// 默认不订阅 1<<24：未获权限的机器人订阅会被 4014 断开。
-	if DefaultIntents&IntentGroupMemberEvent != 0 {
-		t.Fatal("DefaultIntents 不应包含 IntentGroupMemberEvent")
+func TestDefaultIntentsIncludesGroupMember(t *testing.T) {
+	// 2026-11-03 用户拍板：默认包含 1<<24（群成员/入群申请事件）。
+	// 若机器人无该权限会被 4014 断开，此时应显式调小 Intents（见 ws.go 注释）。
+	if DefaultIntents&IntentGroupMemberEvent == 0 {
+		t.Fatal("DefaultIntents 应包含 IntentGroupMemberEvent")
 	}
-	if DefaultIntents != IntentGroupAndC2CEvent|IntentInteraction {
+	if DefaultIntents != IntentGroupMemberEvent|IntentGroupAndC2CEvent|IntentInteraction {
 		t.Fatalf("DefaultIntents = %#x", DefaultIntents)
 	}
-	if IntentGroupMemberEvent != 1<<24 {
-		t.Fatalf("IntentGroupMemberEvent = %#x, want 1<<24", IntentGroupMemberEvent)
+	if IntentGroupMemberEvent != 1<<24 || IntentGroupAndC2CEvent != 1<<25 || IntentInteraction != 1<<26 {
+		t.Fatalf("intent 位错误: %#x %#x %#x", IntentGroupMemberEvent, IntentGroupAndC2CEvent, IntentInteraction)
 	}
 }
 

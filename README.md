@@ -80,6 +80,8 @@ mux.Handle("/callback", h)
 ```
 
 平台 3s 超时会重推：Handler 先 ACK 再异步回调；op13 URL 校验挑战按官方协议内置。
+`Handler.Close()` 会停止接收（之后新请求返回 503，平台会重推）、关闭队列并等待已入队事件处理完；
+`Options.OnEventTimeout` 给单条处理加超时 ctx；队列满时调 `Options.OnDrop`（ACK 后弃事件不可恢复）；
 
 ## 按钮互动（INTERACTION_CREATE）
 
@@ -369,16 +371,22 @@ ev.FriendScene      // FRIEND_ADD 的场景值（1000/1001/...）
 ev.SceneParam       // FRIEND_ADD 的 callback_data（配合 GenerateURLLink 做邀请来源归因）
 ```
 
-> INTENT：WS 默认订阅 `GROUP_AND_C2C_EVENT(1<<25) | INTERACTION(1<<26)`。
-> `GROUP_MEMBER_ADD/REMOVE`、`GROUP_JOIN_REQUEST` 属于 `GROUP_MEMBER_EVENT(1<<24)`，
-> 默认**不**订阅（未获该能力的机器人订阅会被 4014 断开）；需要时显式
-> `Intents: ws.DefaultIntents | ws.IntentGroupMemberEvent`。
+> INTENT：WS 默认订阅 `GROUP_MEMBER_EVENT(1<<24) | GROUP_AND_C2C_EVENT(1<<25) | INTERACTION(1<<26)`
+> （2026-11-03 起包含群成员/入群申请事件）。若机器人未被平台授予群成员事件权限，
+> 订阅 1<<24 会被 4014 断开，`Run` 返回 `ws.ErrTerminalClose`；此时显式调小：
+> `Intents: ws.IntentGroupAndC2CEvent | ws.IntentInteraction`。
+> 分片：默认 `Shard{0,1}`；设 `Options.GatewayBot = true` 会走 `GET /gateway/bot`，
+> 拿到平台建议分片数与 session 限额（建议数 > 当前配置时打 Warn），也可调
+> `Transport.GatewayBot(ctx)` 自行读取。
 
 ## 重试与生命周期（v0.3.0 起）
 
-- **网络错误 / 429**：自动重试（上限 3 次，指数退避；429 优先用 `Retry-After`）。
+- **网络错误 / 429**：自动重试（上限 3 次，指数退避 + 0~20% 抖动；429 优先用 `Retry-After`，
+  且服务器给了等待时长时精确遵守不加抖动）。
 - **5xx**：只对幂等方法（GET/PUT/DELETE）自动重试；**非幂等 POST 默认不重发**（平台可能已处理，
   重发会重复发消息）。要恢复旧行为：`api.Config{RetryNonIdempotent: true}`。
+- **响应体上限 4MB**：超限返回明确错误（不再静默截断成"JSON 解析失败"）。
+- **配额日上限只计成功发送**：平台拒绝/超时/ctx 取消不占当日额度（否则一轮故障能打光当天额度）。
 - **401**：token 存储实现 `token.Deleter`（默认 `token.Memory` 已实现）时，自动作废缓存 →
   换新 token → 重试一次，不再一直失败到 TTL。
 - **WS 关闭码**：`4001/4002/4010~4014/4914/4915` 视为不可恢复，`Run` 返回 `ws.ErrTerminalClose`

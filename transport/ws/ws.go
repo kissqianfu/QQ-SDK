@@ -56,10 +56,6 @@ var (
 )
 
 // Intent 位（官方 intents；本 SDK 只涉及群聊/单聊相关位）。
-//
-// ⚠️ GROUP_MEMBER_EVENT(1<<24) 不放进默认值：未获平台该能力的机器人订阅这一位
-// 会被 4014 断开。需要收 GROUP_MEMBER_ADD/REMOVE、GROUP_JOIN_REQUEST 的宿主
-// 显式写 Intents: DefaultIntents | IntentGroupMemberEvent，并自行承担权限风险。
 const (
 	IntentGuilds           uint32 = 1 << 0  // 频道（本 SDK 不支持）
 	IntentGuildMembers     uint32 = 1 << 1  // 频道成员（本 SDK 不支持）
@@ -68,8 +64,15 @@ const (
 	IntentInteraction      uint32 = 1 << 26 // INTERACTION_CREATE
 )
 
-// DefaultIntents 是 Options.Intents 为 0 时的默认订阅（群聊/单聊消息 + 互动）。
-const DefaultIntents = IntentGroupAndC2CEvent | IntentInteraction
+// DefaultIntents 是 Options.Intents 为 0 时的默认订阅：群成员事件 + 群/单聊消息 + 互动。
+//
+// ⚠️ GROUP_MEMBER_EVENT(1<<24) 已于 2026-11-03 纳入默认（用户拍板）：需要
+// GROUP_MEMBER_ADD/REMOVE、GROUP_JOIN_REQUEST 事件的宿主无需再显式配置。
+// 代价：机器人若未被平台授予该能力，订阅这一位会被 4014 断开；此时 Run 会返回
+// ErrTerminalClose（不再无限重连），宿主应显式调小 Intents 后重启：
+//
+//	ws.Options{Intents: ws.IntentGroupAndC2CEvent | ws.IntentInteraction}
+const DefaultIntents = IntentGroupMemberEvent | IntentGroupAndC2CEvent | IntentInteraction
 
 // wsCloseError 携带网关关闭码（gorilla 的 *websocket.CloseError 提取而来）。
 type wsCloseError struct {
@@ -125,6 +128,22 @@ type SessionStore interface {
 	Clear(ctx context.Context) error
 }
 
+// SessionStartLimit 是平台对 session 创建的限制（官方 GET /gateway/bot 响应字段）。
+type SessionStartLimit struct {
+	Total     int `json:"total"`
+	Remaining int `json:"remaining"`
+	// ResetAfter 是限额重置剩余时间（毫秒）。
+	ResetAfter     int `json:"reset_after"`
+	MaxConcurrency int `json:"max_concurrency"`
+}
+
+// GatewayBotInfo 是 GET /gateway/bot 的响应：接入点 + 平台建议分片数 + session 限额。
+type GatewayBotInfo struct {
+	URL               string            `json:"url"`
+	Shards            int               `json:"shards"`
+	SessionStartLimit SessionStartLimit `json:"session_start_limit"`
+}
+
 // Options 是 ws Transport 参数。
 type Options struct {
 	AppID   string
@@ -138,8 +157,12 @@ type Options struct {
 	// GatewayURL 为空时先 GET GatewayEndpoint 换取 wss 地址（测试可直接覆盖）。
 	GatewayURL      string
 	GatewayEndpoint string
-	HTTP            *http.Client
-	Dialer          *websocket.Dialer
+	// GatewayBot 为 true 时改用 GET /gateway/bot（GatewayEndpoint + "/bot"），
+	// 可拿到平台建议的分片数与 session 创建限额；平台建议分片数大于当前 Shard.Count 时会打 Warn。
+	// 默认 false（沿用 /gateway）。
+	GatewayBot bool
+	HTTP       *http.Client
+	Dialer     *websocket.Dialer
 	// HeartbeatInterval 为 0 时用 Hello 下发的值。
 	HeartbeatInterval time.Duration
 	// StaleTimeout 是读空闲判死阈值：超过该时长没读到任何帧就断开重连。
@@ -240,30 +263,47 @@ func (t *Transport) Run(ctx context.Context, emit func(*event.Event) error) erro
 
 // gatewayURL 先 GET /gateway 换 wss 地址。
 func (t *Transport) gatewayURL(ctx context.Context, token string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.opts.GatewayEndpoint, nil)
+	info, err := t.getGateway(ctx, token, t.opts.GatewayEndpoint)
 	if err != nil {
-		return "", fmt.Errorf("ws: build gateway request: %w", err)
+		return "", err
+	}
+	return info.URL, nil
+}
+
+// GatewayBot 取 GET /gateway/bot（分片建议 + session 创建限额），供宿主启动前自检。
+// 宿主可据此决定 Shard.Count，或至少把 session_start_limit 打进日志/指标。
+func (t *Transport) GatewayBot(ctx context.Context) (*GatewayBotInfo, error) {
+	token, err := t.opts.Token(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ws: get token: %w", err)
+	}
+	return t.getGateway(ctx, token, t.opts.GatewayEndpoint+"/bot")
+}
+
+// getGateway 请求一个 gateway 端点并解析 url（/gateway 与 /gateway/bot 共用的骨架）。
+func (t *Transport) getGateway(ctx context.Context, token, endpoint string) (*GatewayBotInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ws: build gateway request: %w", err)
 	}
 	req.Header.Set("Authorization", "QQBot "+token)
 	req.Header.Set("User-Agent", userAgent)
 	resp, err := t.opts.HTTP.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("ws: get gateway: %w", err)
+		return nil, fmt.Errorf("ws: get gateway: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ws: get gateway status %d", resp.StatusCode)
+		return nil, fmt.Errorf("ws: get gateway status %d", resp.StatusCode)
 	}
-	var payload struct {
-		URL string `json:"url"`
-	}
+	var payload GatewayBotInfo
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", fmt.Errorf("ws: decode gateway: %w", err)
+		return nil, fmt.Errorf("ws: decode gateway: %w", err)
 	}
 	if payload.URL == "" {
-		return "", fmt.Errorf("ws: gateway url 为空")
+		return nil, fmt.Errorf("ws: gateway url 为空")
 	}
-	return payload.URL, nil
+	return &payload, nil
 }
 
 // connectOnce 建一次连接并读到断开为止。
@@ -274,9 +314,27 @@ func (t *Transport) connectOnce(ctx context.Context, emit func(*event.Event) err
 	}
 	url := t.opts.GatewayURL
 	if url == "" {
-		url, err = t.gatewayURL(ctx, token)
-		if err != nil {
-			return err
+		if t.opts.GatewayBot {
+			info, err := t.getGateway(ctx, token, t.opts.GatewayEndpoint+"/bot")
+			if err != nil {
+				return err
+			}
+			url = info.URL
+			if info.Shards > 0 && t.opts.Shard.Count == 1 && info.Shards > 1 {
+				t.opts.Logger.Warn("平台建议的分片数大于当前配置，单分片可能承载不稳",
+					"recommended_shards", info.Shards, "configured", t.opts.Shard.Count)
+			}
+			if info.SessionStartLimit.Total > 0 {
+				t.opts.Logger.Info("gateway session 限额",
+					"total", info.SessionStartLimit.Total,
+					"remaining", info.SessionStartLimit.Remaining,
+					"reset_after_ms", info.SessionStartLimit.ResetAfter)
+			}
+		} else {
+			url, err = t.gatewayURL(ctx, token)
+			if err != nil {
+				return err
+			}
 		}
 	}
 

@@ -58,7 +58,15 @@ func (c *Client) Send(ctx context.Context, target Target, msg *send.Message) (*R
 	if err != nil {
 		return nil, err
 	}
-	return parseSendResult(raw)
+	res, err := parseSendResult(raw)
+	if err != nil {
+		return nil, err
+	}
+	// 日上限只统计真正发出去的主动消息（失败不占额度）。
+	if isActiveMessage(msg) {
+		c.quota.noteSent(target.ID)
+	}
+	return res, nil
 }
 
 // isActiveMessage 判断是否为主动消息：既没有 msg_id 也没有 event_id 锚点。

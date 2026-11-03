@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -71,6 +72,9 @@ type Options struct {
 	// OnDrop 可选：事件因队列满被丢弃时回调（ACK 已发出、平台不会重推，属不可恢复丢事件）。
 	// 宿主应在这里落死信表/打点告警；注意回调在 HTTP 请求 goroutine 上执行，必须快速返回。
 	OnDrop func(meta EventMeta)
+	// OnEventTimeout 是单条事件处理超时（0 = 不设超时）。超时只取消传给 OnEvent 的 ctx，
+	// 不会强杀 goroutine；OnEvent 实现应按 ctx 及时返回，否则会长期占住 worker。
+	OnEventTimeout time.Duration
 	// OnEvent 收到已验签事件后调用（ACK 之后异步执行）。
 	OnEvent func(ctx context.Context, ev *event.Event)
 }
@@ -84,6 +88,11 @@ type Handler struct {
 	log     *slog.Logger
 	acked   atomic.Int64
 	dropped atomic.Int64
+
+	mu        sync.RWMutex
+	closed    bool
+	wg        sync.WaitGroup
+	closeOnce sync.Once
 }
 
 // seedFromSecret 按官方协议把 Bot Secret repeat 到 32 字节，作为 Ed25519 seed。
@@ -126,11 +135,25 @@ func New(opts Options) (*Handler, error) {
 		log:   opts.Logger,
 	}
 	if opts.OnEvent != nil {
+		h.wg.Add(opts.Workers)
 		for range opts.Workers {
 			go h.worker()
 		}
 	}
 	return h, nil
+}
+
+// Close 停止接收新事件、关闭派发队列并等待 worker 处理完已入队事件。
+// 关闭后 ServeHTTP 返回 503，平台会按重推策略再次投递（不会静默丢事件）。
+// 幂等：重复调用安全。
+func (h *Handler) Close() {
+	h.closeOnce.Do(func() {
+		h.mu.Lock()
+		h.closed = true
+		close(h.queue)
+		h.mu.Unlock()
+		h.wg.Wait()
+	})
 }
 
 // PublicKey 返回公钥（自检/测试用）。
@@ -147,6 +170,14 @@ func (h *Handler) Dropped() int64 { return h.dropped.Load() }
 
 // ServeHTTP 实现 http.Handler。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.mu.RLock()
+	closed := h.closed
+	h.mu.RUnlock()
+	if closed {
+		// Close 之后不再 ACK：让平台按重推策略重投（ACK 了却处理不了才是真丢）。
+		http.Error(w, "webhook closed", http.StatusServiceUnavailable)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -324,27 +355,38 @@ func (h *Handler) dispatch(body []byte) {
 	if h.opts.OnEvent == nil {
 		return
 	}
-	select {
-	case h.queue <- body:
-	default:
-		// ⚠️ ACK 已发出，平台不会重推，这里丢事件是**不可恢复**的。
-		// 调用 OnDrop 让宿主落死信/告警（默认只计数 + 一条 Warn）。
-		h.dropped.Add(1)
-		meta := EventMeta{Raw: body}
-		var env event.Envelope
-		if err := json.Unmarshal(body, &env); err == nil {
-			meta.ID, meta.Type = env.ID, env.T
+	// RLock 与 Close 互斥：避免 Close 关队列时还在 send（panic: send on closed channel）。
+	h.mu.RLock()
+	enqueued := false
+	if !h.closed {
+		select {
+		case h.queue <- body:
+			enqueued = true
+		default:
 		}
-		h.log.Warn("webhook 处理队列已满，丢弃事件（不可恢复，请调大 QueueSize/Workers 或改异步落库）",
-			"event_id", meta.ID, "type", meta.Type, "dropped_total", h.dropped.Load())
-		if h.opts.OnDrop != nil {
-			h.opts.OnDrop(meta)
-		}
+	}
+	h.mu.RUnlock()
+	if enqueued {
+		return
+	}
+	// ⚠️ ACK 已发出，平台不会重推，这里丢事件是**不可恢复**的。
+	// 调用 OnDrop 让宿主落死信/告警（默认只计数 + 一条 Warn）。
+	h.dropped.Add(1)
+	meta := EventMeta{Raw: body}
+	var env event.Envelope
+	if err := json.Unmarshal(body, &env); err == nil {
+		meta.ID, meta.Type = env.ID, env.T
+	}
+	h.log.Warn("webhook 处理队列已满或已关闭，丢弃事件（不可恢复，请调大 QueueSize/Workers 或改异步落库）",
+		"event_id", meta.ID, "type", meta.Type, "dropped_total", h.dropped.Load())
+	if h.opts.OnDrop != nil {
+		h.opts.OnDrop(meta)
 	}
 }
 
 // worker 消费派发队列：解析事件并回调；业务回调 panic 不得打崩进程。
 func (h *Handler) worker() {
+	defer h.wg.Done()
 	for body := range h.queue {
 		h.handleBody(body)
 	}
@@ -361,7 +403,13 @@ func (h *Handler) handleBody(body []byte) {
 		h.log.Warn("webhook 事件解析失败", "err", err)
 		return
 	}
-	h.opts.OnEvent(context.Background(), ev)
+	ctx := context.Background()
+	if h.opts.OnEventTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, h.opts.OnEventTimeout)
+		defer cancel()
+	}
+	h.opts.OnEvent(ctx, ev)
 }
 
 // writeACK 写平台 ACK。

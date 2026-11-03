@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,6 +19,9 @@ import (
 	"github.com/kissqianfu/QQ-SDK/apierr"
 	"github.com/kissqianfu/QQ-SDK/token"
 )
+
+// errBodyTooLarge 表示响应体超过 maxBody：显式报错，不静默截断成"解析失败"。
+var errBodyTooLarge = errors.New("api: 响应体超过上限")
 
 const (
 	// userAgent 是统一 UA（平台用于识别接入方）。
@@ -60,7 +65,11 @@ func (c *Client) runWithRetry(ctx context.Context, fn func(attempt int) (retryab
 		if attempt > 1 {
 			delay := retryBase * time.Duration(attempt-1)
 			if retryAfter > 0 {
+				// 服务器明确给了等待时长就精确遵守，不加抖动。
 				delay = retryAfter
+			} else {
+				// 自己的指数退避加 0~20% 抖动：多实例同时 5xx 时避免同步重试尖峰。
+				delay = withJitter(delay)
 			}
 			if err := c.sleepCtx(ctx, delay); err != nil {
 				return err
@@ -86,6 +95,18 @@ func (c *Client) runWithRetry(ctx context.Context, fn func(attempt int) (retryab
 	return lastErr
 }
 
+// withJitter 给退避时长加 0~20% 抖动。
+func withJitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	span := int64(d / 5)
+	if span <= 0 {
+		return d
+	}
+	return d + time.Duration(rand.Int63n(span+1)) // #nosec G404 -- 仅用于退避抖动，非安全用途
+}
+
 // do 发一次带重试的请求：429/网络错误总是重试；5xx 仅对幂等方法重试，
 // 非幂等 POST（发消息、创建面板等）默认不重试——平台可能在返回 5xx 前已经处理成功，
 // 盲目重发会造成重复消息/重复资源。需要旧行为时显式开 Config.RetryNonIdempotent。
@@ -108,6 +129,10 @@ func (c *Client) do(ctx context.Context, method, url, tok string, body any) ([]b
 	err := c.runWithRetry(ctx, func(int) (bool, time.Duration, error) {
 		raw, err := c.once(ctx, method, url, tok, payload)
 		if err != nil {
+			// 响应体超限是确定性错误，重试也一样。
+			if errors.Is(err, errBodyTooLarge) {
+				return false, 0, err
+			}
 			// 传输层错误：连接重置/超时/读响应失败时，请求可能**已经到达平台并被处理**，
 			// 只是响应丢了。非幂等请求重发会造成重复消息/重复资源，因此默认不重试。
 			if !idempotent && !c.retryNonIdempotent && ctx.Err() == nil {
@@ -186,9 +211,13 @@ func (c *Client) once(ctx context.Context, method, url, tok string, payload []by
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	// 多读 1 字节用于判断是否超限：超限必须显式报错，不能静默截断成"JSON 解析失败"。
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return nil, fmt.Errorf("api: read body: %w", err)
+	}
+	if len(body) > maxBody {
+		return nil, fmt.Errorf("%w: 超过 %d 字节", errBodyTooLarge, maxBody)
 	}
 	return &httpResult{status: resp.StatusCode, body: body, retryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}, nil
 }

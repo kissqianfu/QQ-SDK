@@ -231,10 +231,23 @@ func (q *quota) acquire(scene event.Scene, targetID string) error {
 		}
 	}
 
-	if q.cfg.DailyPerTarget > 0 {
-		q.noteDaily(targetID)
-	}
+	// 日计数不在这里 +1：只有真正发送成功才计（见 noteSent），
+	// 否则请求失败也会白占当日额度。
 	return nil
+}
+
+// noteSent 记一条"已经成功发出"的主动消息。
+//
+// ⚠️ 日上限只统计成功发出的：`acquire` 阶段只查不计数，发送失败（平台 4xx/5xx/ctx 取消）
+// 不会白占当日额度——否则一轮故障就能把目标当天的 1000 条额度打光。
+func (q *quota) noteSent(targetID string) {
+	if q == nil || q.cfg.DailyPerTarget <= 0 {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.rollDay(q.cfg.Now())
+	q.noteDaily(targetID)
 }
 
 // relationBucket 取（必要时创建）某个目标的桶；键表满时淘汰最老的键。
