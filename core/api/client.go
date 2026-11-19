@@ -126,7 +126,7 @@ func New(cfg Config) (*Client, error) {
 	if cfg.Retry != nil {
 		switch {
 		case cfg.Retry.MaxAttempts < 0, cfg.Retry.MaxAttempts == 1:
-			// 负数 = 关闭重试；1 = 只试一次。两者语义相同，合并处理。
+			// 负数 = 关闭重试；1 = 只试一次。
 			c.retryAttempts = 1
 		case cfg.Retry.MaxAttempts > 1:
 			c.retryAttempts = cfg.Retry.MaxAttempts
@@ -144,7 +144,7 @@ func New(cfg Config) (*Client, error) {
 	if c.tokenURL == "" {
 		c.tokenURL = AuthURL
 	}
-	// 统一去掉尾斜杠：否则拼出 //v2/... 会被网关当成不同路径。
+	// 统一去掉基址尾斜杠，避免拼出 //v2/... 这类路径。
 	c.baseURL = strings.TrimRight(c.baseURL, "/")
 	c.tokenURL = strings.TrimRight(c.tokenURL, "/")
 	if c.http == nil {

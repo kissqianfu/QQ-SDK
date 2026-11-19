@@ -111,8 +111,7 @@ type Message struct {
 	refIdx   string
 	replyID  string
 	replyEv  string // event_id 锚点（与 replyID 互斥）
-	// replySet/evSet 记录"锚点方法被调用过"：空串既可能是未设置，也可能是误传空值，
-	// 两者在协议层差别巨大（后者会静默降级成主动消息并消耗主动配额）。
+	// replySet/evSet 记录锚点方法是否被调用过（用于区分未设置与误传空值）。
 	replySet bool
 	evSet    bool
 	seq      int
@@ -137,7 +136,6 @@ func Markdown(content string) *Message { return &Message{kind: KindMarkdown, tex
 // NewMarkdownTemplate 构造模板 Markdown 消息。
 //
 // Deprecated: 官方已废弃模板 Markdown，新代码请用 send.Markdown(content)。
-// 计划随下一个 minor 版本评估移除（当前保留：README 能力表仍有列出）。
 func NewMarkdownTemplate(templateID string, params ...MarkdownParam) *Message {
 	return &Message{kind: KindMarkdown, mdTpl: &MarkdownTemplate{ID: templateID, Params: params}}
 }
@@ -148,8 +146,7 @@ func NewCard(c Card) *Message { return &Message{kind: KindCard, card: c} }
 // Media 构造富媒体消息（fileInfo 由上传接口返回）。
 func Media(fileInfo string) *Message { return &Message{kind: KindMedia, media: fileInfo} }
 
-// Keyboard 挂自定义内嵌键盘（与 KeyboardTemplate 互斥）。
-// 内部深拷贝：调用方后续改原 Keyboard 不会绕过已通过的 Validate。
+// Keyboard 挂自定义内嵌键盘（与 KeyboardTemplate 互斥），内部深拷贝。
 func (m *Message) Keyboard(k Keyboard) *Message {
 	m.keyboard = k.clone()
 	return m
@@ -285,8 +282,7 @@ func (m *Message) Validate() error {
 	if (m.replyID != "" || m.replyEv != "") && m.seq < 1 {
 		return fmt.Errorf("send: msg_seq 必须从 1 开始单调递增（当前 %d）", m.seq)
 	}
-	// 键盘校验与消息类型无关：必须先于 kind 分支执行，否则卡片消息会整段绕过
-	// （历史上 KindCard 直接 return，导致"卡片+键盘"这个最常用组合完全不受校验）。
+	// 键盘校验与消息类型无关，先于 kind 分支执行。
 	if m.keyboard != nil && m.kbID != "" {
 		return errors.New("send: 自定义 keyboard 与 keyboard 模板 id 只能二选一")
 	}
@@ -306,7 +302,7 @@ func (m *Message) Validate() error {
 				return errors.New("send: 文本内容不能为空")
 			}
 		} else {
-			// 模板与正文二选一：同时设置时 buildSendBody 只会取模板，正文被静默丢弃。
+			// 模板与正文只能二选一。
 			if strings.TrimSpace(m.text) != "" {
 				return errors.New("send: markdown 模板与正文只能二选一")
 			}
@@ -367,8 +363,7 @@ func CheckHTTPS(field, raw string) error {
 	return nil
 }
 
-// urlLike 匹配任何 URL 形态：带 scheme 的（含 //）、以及 javascript:/data:/vbscript:。
-// 原来只查小写 http(s)://，HTTPS:// 与 javascript: 都能绕过。
+// urlLike 匹配带 scheme 的 URL 与 javascript:/data:/vbscript: 形态（大小写不敏感）。
 var urlLike = regexp.MustCompile(`(?i)([a-z][a-z0-9+.\-]*://)|(?:javascript|data|vbscript):`)
 
 // validateKeyboard 校验内嵌键盘行数与按钮数。
@@ -403,7 +398,7 @@ func validateKeyboard(k Keyboard) error {
 				return fmt.Errorf("send: 键盘第 %d 行第 %d 个按钮 action.type 非法 %d（合法 0 跳转/1 回调/2 指令）", i+1, j+1, btn.ActionType)
 			}
 			if btn.ActionType == 0 {
-				// 跳转按钮同样必须是 https 外链（卡片/菜单都是这个约束，这里原本只判非空）。
+				// 跳转按钮的 link 必须是 https 外链。
 				if err := CheckHTTPS(fmt.Sprintf("buttons[%d][%d].link", i+1, j+1), btn.Link); err != nil {
 					return err
 				}

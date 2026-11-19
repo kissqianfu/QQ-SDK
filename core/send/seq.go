@@ -17,7 +17,7 @@ type SeqAllocator interface {
 // maxMemorySeqKeys 是内存实现的锚点上限，超出按 LRU 淘汰。
 const maxMemorySeqKeys = 4096
 
-// maxSeqValue 是 msg_seq 的协议上限（int32 上限）：到顶后宁可报错也不回绕成负数。
+// maxSeqValue 是 msg_seq 的协议上限（int32 上限），到顶后报错不回绕。
 const maxSeqValue = 1<<31 - 1
 
 // memorySeq 是单进程内存实现（重启归零）。
@@ -67,8 +67,7 @@ func (s *memorySeq) touch(anchor string) {
 	s.order = append(s.order, anchor)
 }
 
-// evictLRU 淘汰最久未使用的锚点。不能用 FIFO：淘汰一个仍在回复的 msg_id 会让它的
-// seq 从 1 重来，而平台按 msg_id+msg_seq 判重 → 消息被静默丢弃。
+// evictLRU 淘汰最久未使用的锚点（锚点被淘汰后 seq 从 1 重新计数）。
 func (s *memorySeq) evictLRU() {
 	for len(s.order) > 0 {
 		old := s.order[0]

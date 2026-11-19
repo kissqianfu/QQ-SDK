@@ -25,8 +25,7 @@ import (
 var userAgent = version.UserAgent()
 
 const (
-	// DefaultGatewayEndpoint 是获取 wss 地址的 HTTP 端点（2026-08 起官方统一域名；
-	// 旧地址 https://api.sgroup.qq.com/gateway 仍可用，GatewayEndpoint 可覆盖）。
+	// DefaultGatewayEndpoint 是获取 wss 地址的 HTTP 端点；Options.GatewayEndpoint 可覆盖。
 	DefaultGatewayEndpoint = "https://api.bot.qq.com/gateway"
 	// defaultHeartbeat 是 Hello 没给间隔时的兜底（30s）。
 	defaultHeartbeat = 30 * time.Second
@@ -222,7 +221,7 @@ func (t *Transport) Run(ctx context.Context, emit func(*event.Event) error) erro
 			return nil
 		}
 		t.opts.Logger.Warn("ws 连接中断，准备重连", "err", err, "alive", time.Since(started).Round(time.Second))
-		// 关闭码决定"能不能重连、要不要丢 session"，不能把所有断开都当网络抖动。
+		// 按关闭码决定能否重连、是否丢 session。
 		var ce *wsCloseError
 		if errors.As(err, &ce) {
 			switch classifyClose(ce.code) {
@@ -268,8 +267,7 @@ func (t *Transport) gatewayURL(ctx context.Context, token string) (string, error
 	return info.URL, nil
 }
 
-// GatewayBot 取 GET /gateway/bot（分片建议 + session 创建限额），供宿主启动前自检。
-// 宿主可据此决定 Shard.Count，或至少把 session_start_limit 打进日志/指标。
+// GatewayBot 取 GET /gateway/bot：分片建议 + session 创建限额。
 func (t *Transport) GatewayBot(ctx context.Context) (*GatewayBotInfo, error) {
 	token, err := t.opts.Token(ctx)
 	if err != nil {
@@ -442,7 +440,10 @@ func (t *Transport) connectOnce(ctx context.Context, emit func(*event.Event) err
 	defer hbCancel()
 	go t.heartbeat(hbCtx, write, interval, seqFn)
 
-	var idWarned bool // 缺外层 id 只告警一次
+	// idWarned 记录本连接内已告警过「缺外层 id」的消息类型。按类型去重而不是一个布尔：
+	// 平台若只对某一类消息漏 id，另一类的问题不该被前一条告警吞掉；类型总数上限就是
+	// IsMessageType 认的三种，表不会长。
+	idWarned := make(map[event.Type]bool, 3)
 
 	// 4) 读事件循环（每帧前重设读超时，靠 StaleTimeout 判死）。
 	for {
@@ -464,10 +465,12 @@ func (t *Transport) connectOnce(ctx context.Context, emit func(*event.Event) err
 		}
 		switch frame.Op {
 		case 0: // 事件分发
-			if frame.ID == "" && !idWarned {
-				// 外层 id 缺失时去重与 event_id 被动回复都失效，一次性提醒（每连接一次）。
-				idWarned = true
-				t.opts.Logger.Warn("ws 事件帧缺少外层 id：去重与 event_id 被动回复将不可用", "type", frame.T)
+			// 外层 id 是消息事件的必需品（去重、event_id 被动回复都靠它）；READY/RESUMED
+			// 这类控制帧本来就没 id，不能当成「去重能力缺失」的证据。判定因此落在事件语义
+			// （IsMessageType）上，而不是「这一帧有没有 id」。
+			if typ := event.Type(frame.T); frame.ID == "" && event.IsMessageType(typ) && !idWarned[typ] {
+				idWarned[typ] = true
+				t.opts.Logger.Warn("ws 消息事件缺少外层 id：去重与 event_id 被动回复将不可用", "type", frame.T)
 			}
 			seqMu.Lock()
 			if frame.S != 0 {

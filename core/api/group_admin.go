@@ -1,7 +1,6 @@
 package api
 
 // group_admin.go 是群管理域的写/查接口：禁言、成员列表/移出、黑名单、入群申请审批。
-// 与 group.go 的分工：group.go 放机器人自身视角的只读查询，本文件放管理员视角的治理接口。
 
 import (
 	"context"
@@ -108,7 +107,7 @@ type BatchRemoveMembersResult struct {
 // maxRejectReasonRunes 是拒绝理由的协议上限（官方 200 字符）。
 const maxRejectReasonRunes = 200
 
-// validateOpenIDBatch 校验批量 openid 数量（官方上限 20），错误文案统一。
+// validateOpenIDBatch 校验批量 openid 数量（官方上限 20）。
 func validateOpenIDBatch(field string, ids []string) error {
 	if len(ids) == 0 || len(ids) > 20 {
 		return fmt.Errorf("api: %s 数量必须在 1~20（当前 %d）", field, len(ids))

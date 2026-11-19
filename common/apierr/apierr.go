@@ -24,8 +24,7 @@ func (e *APIError) Error() string {
 func (e *APIError) IsDuplicate() bool { return e.Code == 40054005 }
 
 // IsExpired 表示被动回复窗口/次数超限，或消息/事件锚点已过期。
-// 口径 = 锚点被拒全集（见 IsAnchorRejected）∪ 40034027（event_id 次数超限——
-// 锚点本身未失效但本周期已用尽，同样"过期"不可原样重试）。单一事实来源，避免两处码表漂移。
+// 口径 = 锚点被拒全集（见 IsAnchorRejected）∪ 40034027（event_id 次数超限），不可原样重试。
 func (e *APIError) IsExpired() bool {
 	return e.IsAnchorRejected() || e.Code == 40034027
 }
@@ -45,7 +44,7 @@ func (e *APIError) IsAuth() bool {
 }
 
 // IsAnchorRejected 表示被动回复锚点被平台明确拒绝且消息未送达，可换下一个锚点重发。
-// 刻意不含 40054005（去重=已成功），换锚点重发会使用户收到两条。
+// 不含 40054005（去重=已成功）。
 func (e *APIError) IsAnchorRejected() bool {
 	switch e.Code {
 	case 40034024, 40034025, 40034026, 40034005, 304103, 40034128:
@@ -60,8 +59,7 @@ func (e *APIError) IsRateLimited() bool {
 	return e.Code == 40034100 || e.Code == 50002 || e.HTTP == 429
 }
 
-// ErrThrottledLocal 表示本地主动配额拒绝（未调用平台）；必须与平台 429 分开处置：
-// 本地拒绝重试无意义，平台 429 等 Retry-After 重试有意义。
+// ErrThrottledLocal 表示本地主动配额拒绝（未调用平台），须与平台 429 区分处置。
 var ErrThrottledLocal = errors.New("qqbot: 本地主动配额已满")
 
 // ThrottleError 是本地主动配额拒绝的详细错误：Layer 供宿主导出分标签指标，
@@ -79,5 +77,5 @@ func (e *ThrottleError) Error() string {
 	return fmt.Sprintf("qqbot: 本地主动配额已满 layer=%s", e.Layer)
 }
 
-// Is 让 errors.Is(err, ErrThrottledLocal) 成立，业务不必记住具体类型。
+// Is 让 errors.Is(err, ErrThrottledLocal) 成立。
 func (e *ThrottleError) Is(target error) bool { return target == ErrThrottledLocal }

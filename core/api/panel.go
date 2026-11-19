@@ -244,7 +244,7 @@ func validatePanel(p Panel) error {
 		switch item.Type {
 		case PanelItemCommand:
 		case PanelItemLink:
-			// 面板链接与菜单链接同一官方要求（https://），复用同一校验。
+			// 面板链接与菜单链接同一官方要求（https://）。
 			if err := checkMenuHTTPS(fmt.Sprintf("items[%d].link", i), item.Link); err != nil {
 				return err
 			}

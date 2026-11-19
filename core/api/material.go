@@ -1,6 +1,6 @@
 package api
 
-// material.go 是素材管理域：Markdown 图片预上传换取 qqbot-media:// 引用，避免公网图床。
+// material.go 是素材管理域：Markdown 图片预上传换取 qqbot-media:// 引用。
 // 注意与 media.go 的 /files 富媒体链路不是一条链路（那里产出 file_info）。
 
 import (
@@ -62,7 +62,7 @@ type MaterialList struct {
 }
 
 // MaterialPrepare 申请素材上传（POST /v2/media-images/prepare）。
-// 本地先校验格式/扩展名/大小并计算 md5、sha1，省一次 400 往返。
+// 本地先校验格式/扩展名/大小并计算 md5、sha1。
 func (c *Client) MaterialPrepare(ctx context.Context, fileName, contentType string, data []byte) (*MaterialUploadTicket, error) {
 	if err := validateMaterial(fileName, contentType, data); err != nil {
 		return nil, err
@@ -199,7 +199,7 @@ func validateMaterial(fileName, contentType string, data []byte) error {
 	return nil
 }
 
-// materialDigests 计算 prepare 需要的 md5 与 sha1（复用 uploadDigests，少一份等价实现）。
+// materialDigests 计算 prepare 需要的 md5 与 sha1。
 func materialDigests(data []byte) (md5Hex, sha1Hex string) {
 	md5Hex, sha1Hex, _ = uploadDigests(data)
 	return md5Hex, sha1Hex

@@ -53,7 +53,7 @@ type UploadPrepareResult struct {
 	UploadID  string
 	BlockSize int64
 	Parts     []UploadPart
-	// Concurrency 是平台建议的并发度，仅作参考：UploadFileBytes 目前逐片串行上传。
+	// Concurrency 是平台建议的并发度（仅作参考）。
 	Concurrency int
 }
 
@@ -259,7 +259,7 @@ func (c *Client) putOnce(ctx context.Context, presignedURL, contentType string, 
 	if err := checkPresignedURL(presignedURL); err != nil {
 		return nil, fmt.Errorf("%w: %v", errPartPermanent, err)
 	}
-	// 调用方常传 context.Background()：给单次 PUT 兜一个硬上限，避免半死 TCP 永久挂起。
+	// 单次 PUT 的硬上限。
 	ctx, cancel := context.WithTimeout(ctx, uploadTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, presignedURL, bytes.NewReader(data))
@@ -356,7 +356,7 @@ func (c *Client) UploadFileBytes(ctx context.Context, scene event.Scene, targetI
 	if int64(len(data)) > maxUploadBytes {
 		return "", fmt.Errorf("api: upload 文件超过平台硬限制 %d 字节", int64(maxUploadBytes))
 	}
-	// 先校验类型与场景，再算校验和：非法参数不该付全量哈希的代价。
+	// 先校验类型与场景，再算校验和。
 	if err := validateFileType(fileType); err != nil {
 		return "", err
 	}

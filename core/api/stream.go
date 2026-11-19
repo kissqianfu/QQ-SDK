@@ -51,7 +51,7 @@ type StreamFrame struct {
 }
 
 // StreamReply 是一条进行中的单聊流式消息（LLM delta 流 → 打字机效果）。
-// 同一时间只允许一个 goroutine 驱动一条流；内部加锁只为防止误用导致状态撕裂。
+// 同一时间只允许一个 goroutine 驱动一条流。
 type StreamReply struct {
 	mu sync.Mutex
 
@@ -80,7 +80,7 @@ func (c *Client) StartStream(ctx context.Context, target Target, content string,
 	if ct != StreamText && ct != StreamMarkdown {
 		return nil, fmt.Errorf("api: 未知流式内容类型 %q", ct)
 	}
-	// 归一化结果必须写回 cfg：否则空串会原样进请求体（平台按"显式空字符串"解析）。
+	// 归一化结果写回 cfg。
 	cfg.ContentType = ct
 	if cfg.MsgSeq == 0 {
 		cfg.MsgSeq = 1
@@ -122,7 +122,7 @@ func (s *StreamReply) AppendDelta(ctx context.Context, delta string) (*StreamFra
 }
 
 // ReplaceFull 以全量模式替换正文：full 必须以已下发内容为前缀
-// （本地先校验，前缀被改时省一次 40007 往返）。适合需要纠错/重写的场景。
+// （平台 40007：已下发内容前缀不可修改，本地先校验）。
 func (s *StreamReply) ReplaceFull(ctx context.Context, full string) (*StreamFrame, error) {
 	if s.sent.Len() > 0 && !strings.HasPrefix(full, s.sent.String()) {
 		return nil, fmt.Errorf("api: 流式内容与已下发前缀不一致（平台 40007：已下发内容前缀不可修改）")

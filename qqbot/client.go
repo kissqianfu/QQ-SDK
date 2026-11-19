@@ -23,7 +23,7 @@ type Client struct {
 	done   chan struct{} // Run 退出（或从未 Run 就 Close）时关闭
 	// wh 是 webhook 模式的回调处理器；其余模式为 nil（见 ingress.go）。
 	wh *webhook.Handler
-	// stop 在收尾时先于 events 关闭：让在途投递立即返回，避免 send-on-closed。
+	// stop 在收尾时先于 events 关闭，用于中止在途投递。
 	stop chan struct{}
 
 	mu        sync.Mutex
@@ -33,13 +33,13 @@ type Client struct {
 	closeOnce sync.Once // done/events 只能关一次
 	stopOnce  sync.Once // stop 只能关一次
 
-	// evMu/eventsClosed 保护 events 的关闭与发送：自定义 Transport 可能在 Run 返回后
-	// 仍从其他 goroutine 调 emit，只靠 stop 通道无法阻止 send on closed channel。
+	// evMu/eventsClosed 保护 events 的关闭与发送（自定义 Transport 可能在 Run 返回后
+	// 仍从其他 goroutine 调 emit）。
 	evMu         sync.RWMutex
 	eventsClosed bool
 }
 
-// New 只校验配置并构造 REST 客户端（按需装配内置通道），不建立连接（方便测试构造）。
+// New 只校验配置并构造 REST 客户端（按需装配内置通道），不建立连接。
 func New(cfg Config) (*Client, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -142,7 +142,7 @@ func (c *Client) Close() error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		// 已进入关闭流程：等第一个关闭方真正收尾完成，否则调用方会误以为已关闭。
+		// 已进入关闭流程：等第一个关闭方真正收尾完成。
 		<-c.done
 		return nil
 	}

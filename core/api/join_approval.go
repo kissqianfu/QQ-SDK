@@ -1,7 +1,7 @@
 package api
 
 // join_approval.go 是入群自动审批策略接口：命中白名单号码的入群申请自动通过。
-// 路径在 /v2/groups/join_approval_strategy 下，不带 {group_openid} 段（与 group_admin.go 的人工审批互补）。
+// 路径在 /v2/groups/join_approval_strategy 下，不带 {group_openid} 段。
 
 import (
 	"context"
@@ -214,7 +214,7 @@ func (c *Client) ExecuteJoinApprovalStrategy(ctx context.Context, strategyID str
 	if err := checkStrategyID(strategyID); err != nil {
 		return err
 	}
-	// 平台按 JSON 解析请求体，显式发 {} 而不是空 body。
+	// 平台按 JSON 解析请求体，需显式发 {}。
 	if err := c.requestJSON(ctx, http.MethodPost, strategyPath(strategyID, "/execute"),
 		struct{}{}, "execute join approval strategy", nil); err != nil {
 		return err

@@ -103,7 +103,7 @@ func (b *bucket) take(now time.Time) (bool, time.Duration) {
 		b.tokens--
 		return true, 0
 	}
-	// 桶只在 rate > 0 时创建（newBucket 的两个入口都有正数校验）。
+	// 桶只在 rate > 0 时创建。
 	need := (1 - b.tokens) / b.rate
 	return false, time.Duration(need * float64(time.Second))
 }
@@ -177,7 +177,7 @@ func (q *quota) acquire(scene event.Scene, targetID string) error {
 	q.rollDay(now)
 	key := quotaKey(scene, targetID)
 
-	// ① 日上限：只查不消耗，超了立刻拒（不白掉桶令牌）。
+	// ① 日上限：只查不消耗，超了立刻拒。
 	if q.cfg.DailyPerTarget > 0 && q.daily[key] >= q.cfg.DailyPerTarget {
 		q.stats.Daily++
 		return &apierr.ThrottleError{Layer: "daily"}
@@ -252,8 +252,7 @@ func (q *quota) refund(scene event.Scene, targetID string) {
 	}
 }
 
-// quotaKey 把场景并进键：群 openid 与用户 openid 属于不同命名空间，
-// 共用键会让两者的日上限与单关系桶互相挤占。
+// quotaKey 把场景并进键：群 openid 与用户 openid 属于不同命名空间。
 func quotaKey(scene event.Scene, targetID string) string {
 	if scene == event.SceneGroup {
 		return "group:" + targetID

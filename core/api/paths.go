@@ -1,5 +1,5 @@
 // 平台 REST 路径的唯一来源：静态路径用常量，带动态段的一律走构造器（内含转义）。
-// 路径是平台事实（/v2 前缀、下划线命名、/users/@me 不带版本前缀），集中一处才便于与官方文档核对。
+// 路径是平台事实（/v2 前缀、下划线命名、/users/@me 不带版本前缀）。
 
 package api
 
@@ -20,7 +20,7 @@ const (
 	mediaPath        = "/v2/media-images"
 	urlLinkPath      = "/v2/generate_url_link"
 	strategyBasePath = groupsPath + "/join_approval_strategy"
-	// 素材上传是两个动作而不是资源实例，路径与 mediaPath 平级。
+	// 素材上传路径与 mediaPath 平级。
 	materialPreparePath  = mediaPath + "/prepare"
 	materialCompletePath = mediaPath + "/complete"
 	// mePath 官方口径不带 /v2 前缀。

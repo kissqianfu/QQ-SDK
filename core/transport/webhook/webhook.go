@@ -38,7 +38,7 @@ const (
 	maxWorkers = 32
 	// queueSize 是异步派发队列容量（用于吸收突发；满了回 503 让平台重推）。
 	queueSize = 256
-	// defaultOnEventTimeout 是单条事件处理的默认超时：防止 OnEvent 卡死让 Close 永不返回。
+	// defaultOnEventTimeout 是单条事件处理的默认超时。
 	defaultOnEventTimeout = 30 * time.Second
 )
 
@@ -77,7 +77,7 @@ type Handler struct {
 	opts    Options
 	key     ed25519.PrivateKey
 	now     func() time.Time
-	queue   chan queuedEvent // 已 ACK 待异步处理的事件（信封+原文成对入队，解析只做一次）
+	queue   chan queuedEvent // 已 ACK 待异步处理的事件（信封与原文成对入队）
 	log     *slog.Logger
 	acked   atomic.Int64
 	dropped atomic.Int64
@@ -108,7 +108,7 @@ func New(opts Options) (*Handler, error) {
 	if opts.Secret == "" {
 		return nil, fmt.Errorf("webhook: Secret 不能为空")
 	}
-	// OnEvent 缺失会让所有事件被 ACK 后静默丢弃，必须在构造期就拒绝。
+	// OnEvent 必须在构造期提供。
 	if opts.OnEvent == nil {
 		return nil, fmt.Errorf("webhook: OnEvent 不能为空")
 	}
@@ -195,7 +195,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	closed := h.closed
 	h.mu.RUnlock()
 	if closed {
-		// Close 之后不再 ACK：让平台按重推策略重投（ACK 了却处理不了才是真丢）。
+		// Close 之后不再 ACK，让平台按重推策略重投。
 		http.Error(w, "webhook closed", http.StatusServiceUnavailable)
 		return
 	}
@@ -230,7 +230,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.opts.AppID != "" {
-		// 配了 AppID 就必须校验：允许缺失等于给"省略请求头"开了后门。
+		// 配了 AppID 就必须校验。
 		if got := r.Header.Get(AppIDHeader); got != h.opts.AppID {
 			h.log.Warn("webhook appid 不匹配", "got", got)
 			http.Error(w, "appid mismatch", http.StatusUnauthorized)
@@ -238,9 +238,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 入队成功才 ACK：队列满时回 503，让平台按重推策略重投，而不是 ACK 后丢事件。
-	// 去重放在 worker 里做（见 handleBody）：在这里先提交去重记录，会让"入队失败"
-	// 的事件被永久判重，连平台重推都救不回来。
+	// 入队成功才 ACK：队列满时回 503，让平台按重推策略重投。
+	// 去重放在 worker 里做（见 handleBody）。
 	if !h.dispatch(queuedEvent{env: env, raw: body}) {
 		http.Error(w, "busy", http.StatusServiceUnavailable)
 		return
@@ -248,8 +247,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.writeACK(w)
 }
 
-// queuedEvent 是入队事件：ServeHTTP 已解出的信封与原始 body 成对带走，
-// worker 直接 ParseEnvelope，避免同一 payload 反复解码。
+// queuedEvent 是入队事件：ServeHTTP 已解出的信封与原始 body 成对带走。
 type queuedEvent struct {
 	env event.Envelope
 	raw []byte
@@ -286,8 +284,7 @@ func (h *Handler) withinWindow(ts int64) bool {
 	return delta <= h.opts.Window && delta >= -h.opts.Window
 }
 
-// isChallengeToken 校验 op13 的 plain_token 是否为 8~64 位字母数字。
-// 这是安全边界：锁死被签名内容的形态，防止签名预言机伪造事件。
+// isChallengeToken 校验 op13 的 plain_token 是否为 8~64 位字母数字（安全边界）。
 func isChallengeToken(s string) bool {
 	const minLen, maxLen = 8, 64
 	if len(s) < minLen || len(s) > maxLen {
@@ -306,9 +303,9 @@ func isChallengeToken(s string) bool {
 // handleChallenge 处理 op13 URL 校验：签名内容 = event_ts + plain_token。
 // 这是唯一不验签就出签名的入口，入参必须卡到最窄形态（见 isChallengeToken）。
 func (h *Handler) handleChallenge(w http.ResponseWriter, r *http.Request, d json.RawMessage) {
-	// appid 校验与 op0 同口径：只在配置了期望值且请求带了头时比对。
+	// appid 校验与 op0 同口径。
 	if h.opts.AppID != "" {
-		// 配了 AppID 就必须校验：允许缺失等于给"省略请求头"开了后门。
+		// 配了 AppID 就必须校验。
 		if got := r.Header.Get(AppIDHeader); got != h.opts.AppID {
 			h.log.Warn("op13 appid 不匹配", "got", got)
 			http.Error(w, "appid mismatch", http.StatusUnauthorized)
@@ -353,7 +350,7 @@ func (h *Handler) rejectChallenge(w http.ResponseWriter, reason string) {
 
 // dispatch 把事件放入异步队列；队列满或已关闭返回 false（调用方回 503 让平台重推）。
 func (h *Handler) dispatch(item queuedEvent) bool {
-	// RLock 与 Close 互斥：避免 Close 关队列时还在 send（panic: send on closed channel）。
+	// RLock 与 Close 互斥，避免向已关闭的队列发送。
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	if h.closed {
@@ -403,14 +400,12 @@ func (h *Handler) handleBody(item queuedEvent) {
 	}()
 	ev, err := event.ParseEnvelope(&item.env)
 	if err != nil {
-		// 解析失败同样不可恢复：走与队列丢弃相同的 OnDrop 通道。
-		// 信封已在 ServeHTTP 解过，直接复用，不再第三次解码。
+		// 解析失败走与队列丢弃相同的 OnDrop 通道。
 		h.recordDrop(item, "parse_error")
 		h.log.Warn("webhook 事件解析失败（ACK 已发，不可恢复）", "err", err, "event_id", item.env.ID)
 		return
 	}
-	// 去重必须发生在"确认事件已入队"之后：先提交去重再入队，一旦队列满，
-	// 平台重推的同一事件会被判重直接吞掉。
+	// 去重必须发生在事件已入队之后。
 	if h.opts.Deduper != nil && ev.ID != "" {
 		meta := EventMeta{Raw: item.raw, ID: ev.ID, Type: item.env.T}
 		first, err := h.opts.Deduper(h.baseCtx, meta)

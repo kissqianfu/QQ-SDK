@@ -88,7 +88,7 @@ func (c *Config) Validate() error {
 	if c.WebhookOptions != nil && c.WebhookOptions.OnEvent != nil {
 		add("WebhookOptions.OnEvent 由门面接管（事件走 Events()），请勿自行设置")
 	}
-	// Token/Secret/AppID 由门面回填；用户传了不一致的值只会让鉴权/验签静默失败。
+	// Token/Secret/AppID 由门面回填。
 	if c.WSOptions != nil && c.WSOptions.Token != nil {
 		add("WSOptions.Token 由门面回填（复用 REST token 缓存），请勿自行设置")
 	}

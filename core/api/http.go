@@ -21,7 +21,7 @@ import (
 	"github.com/kissqianfu/QQ-SDK/common/version"
 )
 
-// errBodyTooLarge 表示响应体超过 maxBody：显式报错，不静默截断成"解析失败"。
+// errBodyTooLarge 表示响应体超过 maxBody。
 var errBodyTooLarge = errors.New("api: 响应体超过上限")
 
 // userAgent 是统一 UA（平台用于识别接入方），版本随 VERSION 走。
@@ -68,7 +68,7 @@ func (c *Client) runWithRetry(ctx context.Context, fn func(attempt int) (retryab
 				// 服务器明确给了等待时长就精确遵守，不加抖动。
 				delay = retryAfter
 			} else {
-				// 自己的指数退避加 0~20% 抖动：多实例同时 5xx 时避免同步重试尖峰。
+				// 自己的指数退避加 0~20% 抖动。
 				delay = withJitter(delay)
 			}
 			if err := c.sleepCtx(ctx, delay); err != nil {
@@ -107,7 +107,7 @@ func withJitter(d time.Duration) time.Duration {
 	return d + time.Duration(rand.Int63n(span+1)) // #nosec G404 -- 仅用于退避抖动，非安全用途
 }
 
-// do 发一次带重试的请求：429/网络错误总是重试；5xx 仅对幂等方法重试（防重复消息）。
+// do 发一次带重试的请求：429/网络错误总是重试；5xx 仅对幂等方法重试。
 // 401 时若 token 存储实现 token.Deleter，则失效缓存换新 token 重试一次。
 func (c *Client) do(ctx context.Context, method, url, tok string, body any) ([]byte, error) {
 	var payload []byte
@@ -125,11 +125,11 @@ func (c *Client) do(ctx context.Context, method, url, tok string, body any) ([]b
 	err := c.runWithRetry(ctx, func(int) (bool, time.Duration, error) {
 		raw, err := c.once(ctx, method, url, tok, payload)
 		if err != nil {
-			// 响应体超限是确定性错误，重试也一样。
+			// 响应体超限时不重试。
 			if errors.Is(err, errBodyTooLarge) {
 				return false, 0, err
 			}
-			// 传输层错误时请求可能已到达平台，非幂等请求默认不重试。
+			// 非幂等请求遇到传输层错误默认不重试。
 			if !idempotent && !c.retryNonIdempotent && ctx.Err() == nil {
 				return false, 0, err
 			}
@@ -146,15 +146,14 @@ func (c *Client) do(ctx context.Context, method, url, tok string, body any) ([]b
 					tok = newTok
 					return true, 0, parseAPIError(raw.body, raw.status)
 				} else if c.log != nil {
-					// 重取 token 失败的根因不能吞掉，否则只剩一个看不出缘由的 401。
+					// 重取 token 失败时记录根因。
 					c.log.Warn("qqbot api 401 后重取 token 失败，按 401 处理", "err", terr)
 				}
 			}
 			return false, 0, parseAPIError(raw.body, raw.status)
 		}
 		if isRetryableStatus(raw.status) {
-			// 非幂等请求（发消息等）不自动重发：5xx 可能已落库，429 也没有"必然未处理"的
-			// 契约，重发会造成用户可见的重复消息。需要重发时显式开 RetryNonIdempotent。
+			// 非幂等请求（发消息等）不自动重发；需要时显式开 RetryNonIdempotent。
 			if !idempotent && !c.retryNonIdempotent {
 				return false, 0, parseAPIError(raw.body, raw.status)
 			}
@@ -210,7 +209,7 @@ func (c *Client) once(ctx context.Context, method, url, tok string, payload []by
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// 多读 1 字节用于判断是否超限：超限必须显式报错，不能静默截断成"JSON 解析失败"。
+	// 多读 1 字节用于判断是否超限。
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return nil, fmt.Errorf("api: read body: %w", err)
@@ -235,7 +234,7 @@ func parseRetryAfterLimit(raw string, max time.Duration) time.Duration {
 		if sec <= 0 {
 			return 0
 		}
-		// 防溢出：秒数大到无法用 Duration 表示时直接取上限（否则会回绕成负数 → 立刻重试）。
+		// 秒数大到无法用 Duration 表示时直接取上限。
 		if sec > maxRetryAfterSeconds {
 			if max > 0 {
 				return max
@@ -274,7 +273,7 @@ func (c *Client) doPath(ctx context.Context, method, path string, body any) ([]b
 		return nil, err
 	}
 	if tok == "" {
-		// TokenStore 返回空串也当"成功"时不许发出无鉴权请求：那是必然 401 的哑失败。
+		// TokenStore 返回空串时不发无鉴权请求。
 		return nil, errors.New("api: 空 access_token")
 	}
 	return c.do(ctx, method, c.pathURL(path), tok, body)
@@ -304,8 +303,7 @@ func (c *Client) requestJSON(ctx context.Context, method, path string, body any,
 	return nil
 }
 
-// parseAPIError 把平台错误体解析成 APIError；err_code 优先（官方口径），code 兜底，
-// 只读 code 会让 apierr 的判定方法全部失效。
+// parseAPIError 把平台错误体解析成 APIError：err_code 优先（官方口径），code 兜底。
 func parseAPIError(body []byte, status int) *apierr.APIError {
 	var payload struct {
 		ErrCode int    `json:"err_code"`
@@ -327,8 +325,7 @@ func parseAPIError(body []byte, status int) *apierr.APIError {
 // errExcerptLen 是错误体摘要的最大字节数。
 const errExcerptLen = 256
 
-// errExcerpt 把非 JSON 错误体压成单行摘要：剔除控制字符（防日志注入）并截断
-// （响应体上限 4MB，原样进错误串会污染日志并放大内存）。
+// errExcerpt 把非 JSON 错误体压成单行摘要：剔除控制字符（防日志注入）并截断。
 func errExcerpt(body []byte) string {
 	s := strings.TrimSpace(string(body))
 	if s == "" {

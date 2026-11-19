@@ -15,8 +15,7 @@ import (
 	"github.com/kissqianfu/QQ-SDK/core/transport/ws"
 )
 
-// loggerOrDiscard 落实"Config.Logger == nil = 静默"的约定：直接传 nil 给内置通道
-// 会回落到 slog.Default() 往 stderr 打日志，与文档相反。
+// loggerOrDiscard 落实「Config.Logger == nil = 静默」的约定。
 func loggerOrDiscard(l *slog.Logger) *slog.Logger {
 	if l != nil {
 		return l
@@ -37,12 +36,12 @@ func (c *Client) buildIngress() error {
 		opts.AppID = qqtypes.FirstNonEmpty(opts.AppID, c.cfg.AppID)
 		// Token 硬覆盖：WS 鉴权必须复用 REST 的 token 缓存与 401 换票（Validate 已禁止用户自设）。
 		opts.Token = c.api.Token
-		// 代理/自定义 CA 必须与 REST 共用：否则会出现"能发消息、收不到事件"。
+		// 代理/自定义 CA 必须与 REST 共用。
 		if opts.HTTP == nil {
 			opts.HTTP = c.cfg.HTTP
 		}
 		if opts.SessionStore == nil {
-			// 不注入则每次断线都 Identify，断线窗口内的事件会丢（只有 Resume 会补）。
+			// 未注入时使用内存 SessionStore；断线窗口内的事件仅靠 Resume 补发。
 			opts.SessionStore = ws.NewMemorySession()
 		}
 		if opts.Logger == nil {
@@ -66,14 +65,13 @@ func (c *Client) buildIngress() error {
 		}
 		// OnEvent 由门面独占：Validate 已禁止宿主自行设置。
 		opts.OnEvent = func(ctx context.Context, ev *event.Event) {
-			// stop 优先判定让 drain 语义确定：Close 后残留事件立即放弃
-			// （webhook ACK 已发、平台不会重推），不再随机分摊给消费方。
+			// stop 优先判定：Close 后残留事件直接放弃。
 			select {
 			case <-c.stop:
 				return
 			default:
 			}
-			// ctx 是 OnEventTimeout 包出来的：回调超时/停机都不能阻塞 webhook worker。
+			// ctx 由 OnEventTimeout 控制。
 			c.deliver(ev, ctx.Done())
 		}
 		h, err := webhook.New(opts)
@@ -91,8 +89,8 @@ func (c *Client) buildIngress() error {
 // nil 在 select 中永久阻塞 = 不监听，于是 webhook/ws 两种模式共用同一段投递逻辑。
 // 返回 false 表示没投进去，由调用方决定如何报告。
 func (c *Client) deliver(ev *event.Event, cancel <-chan struct{}) bool {
-	// 读锁 + eventsClosed：finalize 关 events 前先拿写锁，保证不会有 send on closed。
-	// 这里的阻塞发送是刻意的（有界缓冲形成反压）：finalize 先关 stop，发送方随即返回。
+	// 读锁 + eventsClosed：finalize 关 events 前先拿写锁，避免 send on closed。
+	// 这里的阻塞发送形成反压。
 	c.evMu.RLock()
 	defer c.evMu.RUnlock()
 	if c.eventsClosed {
@@ -134,7 +132,7 @@ func (c *Client) finalize() {
 	})
 }
 
-// wsEmit 是 ws 模式的事件出口：ctx 取消要返回错误让 transport 停止（既有语义）。
+// wsEmit 是 ws 模式的事件出口，ctx 取消时返回错误以停止 transport。
 func (c *Client) wsEmit(ctx context.Context) func(*event.Event) error {
 	return func(ev *event.Event) error {
 		if c.deliver(ev, ctx.Done()) {

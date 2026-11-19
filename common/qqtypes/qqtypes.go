@@ -9,8 +9,8 @@ import (
 )
 
 // User 是机器人自身信息（GET /users/@me）。
-// 实测（2026-11-18）：share_url 恒有值，welcome_msg 可为空串，两者文档字段表未列、仅出现在响应示例；
-// union_* 需特殊申请，默认不返回（事件体里的 union_* 恒为空，不要读）。
+// share_url 恒有值，welcome_msg 可为空串；union_* 需特殊申请，默认不返回（事件体里的
+// union_* 恒为空，不要读）。
 type User struct {
 	ID       string `json:"id"`       // OpenID 格式，本 bot 自己的 id
 	Username string `json:"username"` // 主昵称（唤醒词与 @ 文本匹配都用它）
@@ -26,7 +26,6 @@ type User struct {
 const timeMilliThreshold = 1_000_000_000_000
 
 // maxTimeSeconds 是 2100-01-01 的 Unix 秒：超出上限的时间戳视为脏数据（返回零值）。
-// 没有这层夹紧，超大 float64 直接转 int64 会溢出成负数，产出年份荒谬的时间。
 const (
 	maxTimeSeconds = int64(4102444800)
 	maxTimeMilli   = maxTimeSeconds * 1000
@@ -53,13 +52,13 @@ func ParseTime(raw json.RawMessage) time.Time {
 		if t, err := time.Parse(time.RFC3339, s); err == nil {
 			return t
 		}
-		// 字符串形式的 Unix 秒/毫秒（个别事件类型出现过）。
+		// 字符串形式的 Unix 秒/毫秒。
 		if n, err := strconv.ParseInt(s, 10, 64); err == nil && n > 0 {
 			return unixGuess(n)
 		}
 		return time.Time{}
 	}
-	// 裸数字：用 float64 承接（容忍小数秒，如 123.5；event/api 两处历史行为并集）。
+	// 裸数字：用 float64 承接，容忍小数秒（如 123.5）。
 	var f float64
 	if err := json.Unmarshal(raw, &f); err != nil || f <= 0 || f > maxSafeFloat {
 		return time.Time{}
@@ -68,7 +67,7 @@ func ParseTime(raw json.RawMessage) time.Time {
 }
 
 // FirstNonEmpty 返回第一个非空（去空白后）字符串；全空返回 ""。
-// 必须 TrimSpace 判空：配置里的 "  " 否则会顶掉真实值，导致鉴权/验签全失败。
+// 必须 TrimSpace 判空，否则纯空白串会顶掉真实值。
 func FirstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if t := strings.TrimSpace(v); t != "" {

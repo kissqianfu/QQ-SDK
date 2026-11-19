@@ -29,7 +29,7 @@ func (c *Client) GenerateURLLink(ctx context.Context, callbackData string) (stri
 	if err != nil {
 		return "", err
 	}
-	// 2026-11-18 真机确认响应形态：{"retcode":0,"msg":"success","data":{"url":...}}。
+	// 响应形态：{"retcode":0,"msg":"success","data":{"url":...}}。
 	var out struct {
 		Retcode int    `json:"retcode"`
 		Msg     string `json:"msg"`
@@ -41,7 +41,7 @@ func (c *Client) GenerateURLLink(ctx context.Context, callbackData string) (stri
 		return "", fmt.Errorf("api: decode url link: %w", err)
 	}
 	if out.Retcode != 0 {
-		// 用 APIError 而不是裸 error：否则 IsAuth/IsRateLimited/errors.As 对这类业务错误全部失效。
+		// 用 APIError 而不是裸 error。
 		return "", &apierr.APIError{Code: out.Retcode, Message: out.Msg, HTTP: http.StatusOK}
 	}
 	if out.Data.URL == "" {

@@ -66,7 +66,7 @@ func (c *Client) SendReply(ctx context.Context, target Target, ev *event.Event, 
 			rejected = append(rejected, fmt.Errorf("锚点 %s 被拒: %w", a, err))
 			continue
 		}
-		return nil, err // 频控/内容/权限等：换锚点也没用
+		return nil, err // 频控/内容/权限等：不重试
 	}
 	return nil, fmt.Errorf("api: 所有被动回复锚点均被拒（共 %d 个）: %w", len(rejected), errors.Join(rejected...))
 }
@@ -89,8 +89,7 @@ func applyAnchor(ctx context.Context, msg *send.Message, a event.Anchor, seqs se
 	case event.AnchorEventID:
 		m, err = msg.ReplyToEventWithSeq(ctx, seqs, a.ID)
 	default:
-		// 防御分支：ReplyAnchors 只产 MsgID/EventID 两种锚点，理论不可达；
-		// 未来平台加新锚点类型时，这里会显式报错而不是静默错挂。
+		// 防御分支：ReplyAnchors 只产 MsgID/EventID 两种锚点。
 		return nil, fmt.Errorf("api: 未知锚点类型 %d", a.Kind)
 	}
 	if err != nil {

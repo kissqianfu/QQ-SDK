@@ -43,7 +43,7 @@ func (c *Client) Send(ctx context.Context, target Target, msg *send.Message) (*R
 		return nil, err
 	}
 	body := buildSendBody(msg)
-	// 主动消息过本地三层配额，且放在 Token() 之前：本地拒绝时绝不触达平台。
+	// 主动消息过本地三层配额（本地拒绝时不触达平台）。
 	active := isActiveMessage(msg)
 	if active {
 		if err := c.quota.acquire(target.Scene, target.ID); err != nil {
@@ -74,14 +74,13 @@ func (c *Client) Send(ctx context.Context, target Target, msg *send.Message) (*R
 		c.quota.noteSent(target.Scene, target.ID)
 	}
 	if res.ID == "" {
-		// 没有 message_id 时上层无法撤回/引用，与其返回一个"成功但不可用"的结果，不如显式失败。
+		// 没有 message_id 时显式失败。
 		return nil, fmt.Errorf("api: send 响应缺少 message_id")
 	}
 	return res, nil
 }
 
 // checkContentLen 在本地拦下超长正文（Config.MaxContentLen，0 = 不校验）。
-// 平台对超长正文返回 40054007，提前拦截可省一次往返和一次平台侧扣额。
 func (c *Client) checkContentLen(msg *send.Message) error {
 	if c.maxContentLen <= 0 {
 		return nil
@@ -204,7 +203,7 @@ func buildSendBody(msg *send.Message) map[string]any {
 		body["event_id"] = evID
 		body["msg_seq"] = seq
 	} else if seq := msg.SeqNo(); seq > 0 {
-		// 主动消息也带 msg_seq：避免平台按 seq + 内容把重复内容判重。
+		// 主动消息也带 msg_seq。
 		body["msg_seq"] = seq
 	}
 	// 互动召回消息：官方 is_wakeup 与 msg_id/event_id 互斥（Validate 已保证）。
