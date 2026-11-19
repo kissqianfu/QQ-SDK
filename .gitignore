@@ -1,0 +1,18 @@
+# 构建产物
+/bin/
+*.exe
+*.test
+*.out
+cover.out
+/cover
+cover.*
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log

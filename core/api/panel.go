@@ -1,0 +1,294 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"unicode/utf8"
+)
+
+// 指令面板 scope（生效场景）取值。
+const (
+	PanelScopeC2C     = "c2c"     // 单聊
+	PanelScopeGroup   = "group"   // 群聊
+	PanelScopeChannel = "channel" // 文字子频道
+	PanelScopeDM      = "dm"      // 频道私信
+)
+
+// 指令面板 target_type（作用范围）取值。
+const (
+	PanelTargetAll      = "all"      // 对该场景下所有用户/群生效
+	PanelTargetSpecific = "specific" // 仅对指定用户/群生效（仅 c2c/group 场景支持）
+)
+
+// 指令面板元素 type 取值。
+const (
+	PanelItemCommand = "command" // 指令：用户点击后内容填入聊天输入框
+	PanelItemLink    = "link"    // 链接跳转
+)
+
+// 指令面板关联对象操作类型（op）。
+const (
+	PanelTargetOpAdd = "add"
+	PanelTargetOpDel = "del"
+)
+
+// PanelItem 是面板中的一个元素（指令或链接）。
+type PanelItem struct {
+	// Name 元素名称，最多 14 个字符；command 点击后填入输入框，link 仅展示。
+	Name string `json:"name,omitempty"`
+	// Desc 元素描述，最多 30 个字符，在面板中展示给用户。
+	Desc string `json:"desc,omitempty"`
+	// Type 元素类型：command / link。
+	Type string `json:"type,omitempty"`
+	// OnlyAdmin 为 true 时仅频道/群管理员可点击。
+	OnlyAdmin bool `json:"only_admin,omitempty"`
+	// Link 跳转 URL，仅 type=link 时有效（需 https:// 开头）。
+	Link string `json:"link,omitempty"`
+}
+
+// Panel 是面板配置内容。
+type Panel struct {
+	// Items 面板元素列表，一个面板最多 20 个。
+	Items []PanelItem `json:"items,omitempty"`
+	// Remark 面板备注（不对用户展示），最多 255 个字符。
+	Remark  string `json:"remark,omitempty"`
+	Version int    `json:"version,omitempty"`
+}
+
+// PanelRecord 是指令面板记录（列表项与详情共用；关联 openid 仅详情接口返回）。
+type PanelRecord struct {
+	PanelID    string `json:"panel_id"`
+	Scope      string `json:"scope"`
+	TargetType string `json:"target_type"`
+	Panel      Panel  `json:"panel"`
+	CreatedAt  string `json:"created_at"` // RFC3339
+	UpdatedAt  string `json:"updated_at"` // RFC3339
+	Version    int    `json:"version"`
+	// UserOpenIDs 关联用户列表：仅 c2c 且 target_type=specific 时返回，最多 1000 条。
+	UserOpenIDs []string `json:"user_openids,omitempty"`
+	// GroupOpenIDs 关联群列表：仅 group 且 target_type=specific 时返回，最多 1000 条。
+	GroupOpenIDs []string `json:"group_openids,omitempty"`
+}
+
+// PanelList 是分页的指令面板列表。
+type PanelList struct {
+	Records    []PanelRecord `json:"records"`
+	NextCursor string        `json:"next_cursor"` // 空串表示已到最后一页
+	IsEnd      bool          `json:"is_end"`
+}
+
+// PanelCreateRequest 是创建指令面板的请求体。
+type PanelCreateRequest struct {
+	// Scope 生效场景（必填）：c2c / group / channel / dm。
+	Scope string `json:"scope"`
+	// TargetType 作用范围：all / specific。channel 与 dm 场景只能为 all。
+	TargetType string `json:"target_type,omitempty"`
+	// UserOpenIDs 用户列表，仅 c2c 且 specific 时有效，一次最多 20 个。
+	UserOpenIDs []string `json:"user_openids,omitempty"`
+	// GroupOpenIDs 群列表，仅 group 且 specific 时有效，一次最多 20 个。
+	GroupOpenIDs []string `json:"group_openids,omitempty"`
+	// Panel 面板配置内容（必填）。
+	Panel Panel `json:"panel"`
+}
+
+// PanelTargetRequest 是修改面板关联对象的请求体。
+type PanelTargetRequest struct {
+	// Op 操作类型（必填）：add / del。
+	Op string `json:"op"`
+	// UserOpenIDs 用户列表，仅 c2c 场景有效，一次最多 20 个。
+	UserOpenIDs []string `json:"user_openids,omitempty"`
+	// GroupOpenIDs 群列表，仅 group 场景有效，一次最多 20 个。
+	GroupOpenIDs []string `json:"group_openids,omitempty"`
+}
+
+// ListPanels 分页拉取指定场景下已生效的指令面板列表（按设置时间倒序，30 QPM）。
+// scope 必填；cursor 首次传空，后续传上次响应的 NextCursor；limit 默认 20、最大 50（0 表示用默认）。
+func (c *Client) ListPanels(ctx context.Context, scope, cursor string, limit int) (*PanelList, error) {
+	if scope == "" {
+		return nil, fmt.Errorf("api: scope 不能为空")
+	}
+	q := pageQuery(cursor, limit, 50)
+	q.Set("scope", scope)
+	var out PanelList
+	if err := c.getJSON(ctx, panelsPath, q, &out); err != nil {
+		return nil, fmt.Errorf("api: list panels: %w", err)
+	}
+	return &out, nil
+}
+
+// ListPanelsAll 拉取指定场景下的全部面板（自动翻页，护栏见 paging.go）。
+func (c *Client) ListPanelsAll(ctx context.Context, scope string) ([]PanelRecord, error) {
+	return paginate(func(cursor string) ([]PanelRecord, string, error) {
+		p, err := c.ListPanels(ctx, scope, cursor, 50)
+		if err != nil {
+			return nil, "", err
+		}
+		next := p.NextCursor
+		if p.IsEnd {
+			next = ""
+		}
+		return p.Records, next, nil
+	})
+}
+
+// CreatePanel 创建指令面板（10 QPM，一个机器人最多 20 个面板），返回新面板 ID。
+func (c *Client) CreatePanel(ctx context.Context, req PanelCreateRequest) (string, error) {
+	if req.Scope == "" {
+		return "", fmt.Errorf("api: scope 不能为空")
+	}
+	if err := validatePanelCreate(req); err != nil {
+		return "", err
+	}
+	var out struct {
+		PanelID string `json:"panel_id"`
+	}
+	if err := c.requestJSON(ctx, http.MethodPost, panelsPath, req, "create panel", &out); err != nil {
+		return "", err
+	}
+	if out.PanelID == "" {
+		return "", fmt.Errorf("api: create panel: 响应缺少 panel_id")
+	}
+	return out.PanelID, nil
+}
+
+// PanelDetail 查询指定指令面板的完整配置详情（含关联的用户/群 openid 列表，30 QPM）。
+func (c *Client) PanelDetail(ctx context.Context, panelID string) (*PanelRecord, error) {
+	if panelID == "" {
+		return nil, fmt.Errorf("api: panel_id 不能为空")
+	}
+	var out PanelRecord
+	if err := c.getJSON(ctx, panelPath(panelID, ""), nil, &out); err != nil {
+		return nil, fmt.Errorf("api: panel detail %s: %w", panelID, err)
+	}
+	return &out, nil
+}
+
+// UpdatePanel 修改指定面板的配置内容（10 QPM）：覆盖原有元素列表与备注，不影响已关联的用户/群列表。
+// 返回修改后的版本号。
+func (c *Client) UpdatePanel(ctx context.Context, panelID string, panel Panel) (int, error) {
+	if panelID == "" {
+		return 0, fmt.Errorf("api: panel_id 不能为空")
+	}
+	if err := validatePanel(panel); err != nil {
+		return 0, err
+	}
+	var out struct {
+		Version int `json:"version"`
+	}
+	err := c.requestJSON(ctx, http.MethodPut, panelPath(panelID, ""),
+		map[string]Panel{"panel": panel}, "update panel "+panelID, &out)
+	if err != nil {
+		return 0, err
+	}
+	return out.Version, nil
+}
+
+// DeletePanel 删除指定指令面板（10 QPM）。删除后该面板不再对任何用户或群生效。
+func (c *Client) DeletePanel(ctx context.Context, panelID string) error {
+	if panelID == "" {
+		return fmt.Errorf("api: panel_id 不能为空")
+	}
+	return c.requestJSON(ctx, http.MethodDelete, panelPath(panelID, ""), nil,
+		"delete panel "+panelID, nil)
+}
+
+// UpdatePanelTargets 添加/移除面板关联的用户或群（60 QPM）。
+// c2c 场景操作用户 openid，group 场景操作群 openid；channel 与 dm 为全局配置，不支持此操作。
+func (c *Client) UpdatePanelTargets(ctx context.Context, panelID string, req PanelTargetRequest) error {
+	if panelID == "" {
+		return fmt.Errorf("api: panel_id 不能为空")
+	}
+	if req.Op != PanelTargetOpAdd && req.Op != PanelTargetOpDel {
+		return fmt.Errorf("api: op 仅支持 add/del，当前 %q", req.Op)
+	}
+	return c.requestJSON(ctx, http.MethodPut, panelPath(panelID, "/target"), req, "update panel targets "+panelID, nil)
+}
+
+// decodeJSON 把响应体解码到 out；空体直接视为成功。
+func decodeJSON(raw []byte, out any) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("api: decode response: %w", err)
+	}
+	return nil
+}
+
+// 面板协议上限（官方请求体约束）。
+const (
+	maxPanelItems    = 20
+	maxPanelNameRune = 14
+	maxPanelDescRune = 30
+	maxPanelRemark   = 255
+	maxPanelTargets  = 20
+)
+
+// validatePanel 校验面板内容本身（元素类型/长度/链接）。
+func validatePanel(p Panel) error {
+	if len(p.Items) > maxPanelItems {
+		return fmt.Errorf("api: 面板元素最多 %d 个（当前 %d）", maxPanelItems, len(p.Items))
+	}
+	if n := utf8.RuneCountInString(p.Remark); n > maxPanelRemark {
+		return fmt.Errorf("api: 面板 remark 最多 %d 字符（当前 %d）", maxPanelRemark, n)
+	}
+	for i, item := range p.Items {
+		if n := utf8.RuneCountInString(item.Name); n < 1 || n > maxPanelNameRune {
+			return fmt.Errorf("api: items[%d].name 长度必须在 1~%d（当前 %d）", i, maxPanelNameRune, n)
+		}
+		if n := utf8.RuneCountInString(item.Desc); n > maxPanelDescRune {
+			return fmt.Errorf("api: items[%d].desc 最多 %d 字符（当前 %d）", i, maxPanelDescRune, n)
+		}
+		switch item.Type {
+		case PanelItemCommand:
+		case PanelItemLink:
+			// 面板链接与菜单链接同一官方要求（https://），复用同一校验。
+			if err := checkMenuHTTPS(fmt.Sprintf("items[%d].link", i), item.Link); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("api: items[%d].type 仅支持 command/link，当前 %q", i, item.Type)
+		}
+	}
+	return nil
+}
+
+// validatePanelCreate 校验创建请求（scope/target_type/关联对象与内容）。
+func validatePanelCreate(req PanelCreateRequest) error {
+	switch req.Scope {
+	case PanelScopeC2C, PanelScopeGroup, PanelScopeChannel, PanelScopeDM:
+	default:
+		return fmt.Errorf("api: scope 仅支持 c2c/group/channel/dm，当前 %q", req.Scope)
+	}
+	target := req.TargetType
+	if target == "" {
+		target = PanelTargetAll
+	}
+	switch target {
+	case PanelTargetAll, PanelTargetSpecific:
+	default:
+		return fmt.Errorf("api: target_type 仅支持 all/specific，当前 %q", target)
+	}
+	// channel/dm 是全局配置，只能 all。
+	if (req.Scope == PanelScopeChannel || req.Scope == PanelScopeDM) && target == PanelTargetSpecific {
+		return fmt.Errorf("api: scope=%s 只能使用 target_type=all（不支持定向）", req.Scope)
+	}
+	if len(req.UserOpenIDs) > maxPanelTargets || len(req.GroupOpenIDs) > maxPanelTargets {
+		return fmt.Errorf("api: 关联用户/群一次最多 %d 个", maxPanelTargets)
+	}
+	if target == PanelTargetSpecific {
+		switch req.Scope {
+		case PanelScopeC2C:
+			if len(req.UserOpenIDs) == 0 {
+				return fmt.Errorf("api: scope=c2c 且 target_type=specific 时必须给 user_openids")
+			}
+		case PanelScopeGroup:
+			if len(req.GroupOpenIDs) == 0 {
+				return fmt.Errorf("api: scope=group 且 target_type=specific 时必须给 group_openids")
+			}
+		}
+	}
+	return validatePanel(req.Panel)
+}
