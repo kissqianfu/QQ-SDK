@@ -59,8 +59,8 @@ type StreamReply struct {
 	userID string
 	cfg    StreamConfig
 
-	id    string        // stream_msg_id
-	index int           // 下一帧序号（从 0 递增）
+	id    string          // stream_msg_id
+	index int             // 下一帧序号（从 0 递增）
 	sent  strings.Builder // 已下发全文（replace 模式本地前缀校验用）
 	done  bool
 }

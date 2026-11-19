@@ -659,4 +659,3 @@ func TestDefaultBaseURL(t *testing.T) {
 		t.Fatalf("ProdBaseURL = %q, want https://api.bot.qq.com", ProdBaseURL)
 	}
 }
-
