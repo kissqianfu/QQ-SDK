@@ -24,14 +24,17 @@ type refreshFlight struct {
 }
 
 // Token 返回有效 access_token：缓存命中直接返回，否则串行刷新（提前 90s 过期）。
-func (c *Client) Token(ctx context.Context) (string, error) {
-	if tok, ok, err := c.tokens.Get(ctx); err != nil {
+//
+// 返回值必须命名：下面的 defer 会用 recover 兜住刷新期的 panic，
+// 只有命名返回值才能把兜底错误真正交给调用方（未命名时 recover 后的赋值会被丢弃）。
+func (c *Client) Token(ctx context.Context) (tok string, err error) {
+	if cached, ok, getErr := c.tokens.Get(ctx); getErr != nil {
 		// 注入的 Store（如 Redis）读失败时记日志并走刷新兜底。
 		if c.log != nil {
-			c.log.Warn("api: 读取 token 缓存失败，走刷新兜底", "err", err)
+			c.log.Warn("api: 读取 token 缓存失败，走刷新兜底", "err", getErr)
 		}
-	} else if ok && tok != "" {
-		return tok, nil
+	} else if ok && cached != "" {
+		return cached, nil
 	}
 
 	c.mu.Lock()
@@ -51,16 +54,14 @@ func (c *Client) Token(ctx context.Context) (string, error) {
 		}
 	}
 	// 双检：首次 Get 与拿到锁之间，可能有别的 leader 已刷新完成并清掉 inflight。
-	if tok, ok, _ := c.tokens.Get(ctx); ok && tok != "" {
+	if cached, ok, _ := c.tokens.Get(ctx); ok && cached != "" {
 		c.mu.Unlock()
-		return tok, nil
+		return cached, nil
 	}
 	fl := &refreshFlight{done: make(chan struct{})}
 	c.inflight = fl
 	c.mu.Unlock()
 
-	var tok string
-	var err error
 	// defer 收尾：panic 时也落错误并关闭 flight。
 	defer func() {
 		if r := recover(); r != nil {
@@ -77,8 +78,7 @@ func (c *Client) Token(ctx context.Context) (string, error) {
 	// 刷新脱离触发者的 ctx。
 	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
 	defer cancel()
-	tok, err = c.refresh(refreshCtx)
-	return tok, err
+	return c.refresh(refreshCtx)
 }
 
 // refresh 向平台换取新 token 并写入缓存（业务失败时 HTTP 仍 200，错误在响应体 code）。

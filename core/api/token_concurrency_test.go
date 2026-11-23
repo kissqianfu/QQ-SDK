@@ -53,6 +53,40 @@ func TestTokenSingleflightConcurrent(t *testing.T) {
 	}
 }
 
+// 刷新期 panic 必须变成错误交给调用方。未命名返回值时 recover 里的赋值会被丢弃，
+// 结果是 (空 token, nil)：leader 发空票被 4004 断开，等待方却拿到真实 panic 错误。
+func TestTokenRefreshPanicReturnsError(t *testing.T) {
+	c, err := New(Config{
+		AppID:     "app",
+		AppSecret: "secret",
+		Tokens:    token.NewMemory(),
+		HTTP:      &http.Client{Transport: panicRoundTripper{}},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	tok, err := c.Token(context.Background())
+	if err == nil {
+		t.Fatalf("刷新 panic 后必须返回错误，实际 tok=%q err=nil", tok)
+	}
+	if tok != "" {
+		t.Fatalf("刷新 panic 后 token 必须为空，实际 %q", tok)
+	}
+	c.mu.Lock()
+	inflight := c.inflight != nil
+	c.mu.Unlock()
+	if inflight {
+		t.Fatal("panic 后 inflight 未清空，后续调用会卡在等待上一次 flight")
+	}
+}
+
+// panicRoundTripper 模拟传输层 panic（如自定义 RoundTripper 的 bug）。
+type panicRoundTripper struct{}
+
+func (panicRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	panic("boom: 模拟传输层 panic")
+}
+
 // 缓存命中后不应再打平台：重复调用必须直接返回内存里的 token。
 func TestTokenCacheHitNoRequest(t *testing.T) {
 	var tokenCalls int32
