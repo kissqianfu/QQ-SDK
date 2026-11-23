@@ -313,3 +313,97 @@ func TestDefaultGatewayEndpoint(t *testing.T) {
 		t.Fatalf("DefaultGatewayEndpoint = %q, want https://api.bot.qq.com/gateway", DefaultGatewayEndpoint)
 	}
 }
+
+// 心跳周期与判死阈值是纯计算，抽出来后可脱离网络单测。
+func TestHeartbeatInterval(t *testing.T) {
+	tests := []struct {
+		name     string
+		override time.Duration
+		helloMS  int
+		want     time.Duration
+	}{
+		{"显式配置优先", 20 * time.Second, 41250, 20 * time.Second},
+		{"用 Hello 下发", 0, 41250, 41250 * time.Millisecond},
+		{"都没给用默认", 0, 0, defaultHeartbeat},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := heartbeatInterval(tt.override, tt.helloMS); got != tt.want {
+				t.Fatalf("heartbeatInterval = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStaleTimeout(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval time.Duration
+		override time.Duration
+		want     time.Duration
+	}{
+		{"默认两倍心跳", 30 * time.Second, 0, 60 * time.Second},
+		{"心跳过小取下限", 5 * time.Second, 0, 15 * time.Second},
+		{"默认放大封顶", 4 * time.Minute, 0, maxStale},
+		{"心跳本身超上限则不压缩", 10 * time.Minute, 0, 20 * time.Minute},
+		{"显式配置优先", 30 * time.Second, 7 * time.Second, 7 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := staleTimeout(tt.interval, tt.override); got != tt.want {
+				t.Fatalf("staleTimeout = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// op9 表示 session 已失效：必须清掉持久化 session，下一条连接回到 Identify。
+// 若继续拿旧 session_id 去 Resume，网关会一直拒绝，形成重连死循环。
+func TestInvalidSessionClearsStoreAndReidentifies(t *testing.T) {
+	g := newFakeGateway(t)
+	store := &memStore{session: Session{SessionID: "sess-dead", Seq: 7}}
+	tr, err := New(Options{
+		AppID:             "app-1",
+		Token:             func(context.Context) (string, error) { return "tok", nil },
+		SessionStore:      store,
+		GatewayURL:        g.wsURL(),
+		HeartbeatInterval: 30 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	_, cancel, done := runAndCancel(t, tr)
+
+	first := <-g.first
+	if op := first["op"].(float64); op != 6 {
+		t.Fatalf("first frame op = %v, want 6 (Resume)", op)
+	}
+
+	g.push(map[string]any{"op": 9, "d": nil}) // 平台宣告 session 失效
+
+	select {
+	case next := <-g.first:
+		if op := next["op"].(float64); op != 2 {
+			t.Fatalf("reconnect frame op = %v, want 2 (Identify)", op)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("op9 之后没有在 5s 内重连")
+	}
+
+	store.mu.Lock()
+	cleared := store.cleared
+	store.mu.Unlock()
+	if cleared == 0 {
+		t.Fatal("op9 未清理持久化 session")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not exit")
+	}
+}

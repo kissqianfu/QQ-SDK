@@ -16,6 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/kissqianfu/QQ-SDK/common/qqtypes"
 	"github.com/kissqianfu/QQ-SDK/common/version"
 	"github.com/kissqianfu/QQ-SDK/core/event"
 	"github.com/kissqianfu/QQ-SDK/core/transport"
@@ -43,6 +44,8 @@ const (
 	resumeWindow = 10 * time.Second
 	// writeTimeout 是单帧写超时（防半死 TCP 下写永久阻塞）。
 	writeTimeout = 10 * time.Second
+	// helloTimeout 是等 Hello 帧的上限。
+	helloTimeout = 30 * time.Second
 	// maxFrameBytes 是单帧读上限。
 	maxFrameBytes = 8 << 20
 )
@@ -216,10 +219,6 @@ func (t *Transport) Run(ctx context.Context, emit func(*event.Event) error) erro
 			t.opts.Logger.Info("ws 下游已关闭，停止重连")
 			return nil
 		}
-		if err == nil {
-			// connectOnce 正常返回（例如平台要求重连）→ 已无继续运行的必要。
-			return nil
-		}
 		t.opts.Logger.Warn("ws 连接中断，准备重连", "err", err, "alive", time.Since(started).Round(time.Second))
 		// 按关闭码决定能否重连、是否丢 session。
 		var ce *wsCloseError
@@ -282,7 +281,7 @@ func (t *Transport) getGateway(ctx context.Context, token, endpoint string) (*Ga
 	if err != nil {
 		return nil, fmt.Errorf("ws: build gateway request: %w", err)
 	}
-	req.Header.Set("Authorization", "QQBot "+token)
+	req.Header.Set("Authorization", qqtypes.AuthPrefix+token)
 	req.Header.Set("User-Agent", userAgent)
 	resp, err := t.opts.HTTP.Do(req)
 	if err != nil {
@@ -303,133 +302,37 @@ func (t *Transport) getGateway(ctx context.Context, token, endpoint string) (*Ga
 }
 
 // connectOnce 建一次连接并读到断开为止。
+// 分工：gatewayAddr 定地址、dial 拨号、helloHandshake 握手、identifyOrResume 上票、readLoop 消费。
 func (t *Transport) connectOnce(ctx context.Context, emit func(*event.Event) error) error {
 	token, err := t.opts.Token(ctx)
 	if err != nil {
 		return fmt.Errorf("ws: get token: %w", err)
 	}
-	url := t.opts.GatewayURL
-	if url == "" {
-		if t.opts.GatewayBot {
-			info, err := t.getGateway(ctx, token, t.opts.GatewayEndpoint+"/bot")
-			if err != nil {
-				return err
-			}
-			url = info.URL
-			if info.Shards > 0 && t.opts.Shard.Count == 1 && info.Shards > 1 {
-				t.opts.Logger.Warn("平台建议的分片数大于当前配置，单分片可能承载不稳",
-					"recommended_shards", info.Shards, "configured", t.opts.Shard.Count)
-			}
-			if info.SessionStartLimit.Total > 0 {
-				t.opts.Logger.Info("gateway session 限额",
-					"total", info.SessionStartLimit.Total,
-					"remaining", info.SessionStartLimit.Remaining,
-					"reset_after_ms", info.SessionStartLimit.ResetAfter)
-			}
-		} else {
-			url, err = t.gatewayURL(ctx, token)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	header := http.Header{"User-Agent": []string{userAgent}}
-	conn, resp, err := t.opts.Dialer.DialContext(ctx, url, header)
+	url, err := t.gatewayAddr(ctx, token)
 	if err != nil {
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-		return fmt.Errorf("ws: dial: %w", err)
+		return err
 	}
-	closeDone := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close() // ctx 取消时打断阻塞读
-		case <-closeDone:
-		}
-	}()
-	defer close(closeDone)
-	defer func() { _ = conn.Close() }()
+	conn, cleanup, err := t.dial(ctx, url)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 
-	// 读帧上限：防异常大帧打爆内存（网关正常事件远小于此）。
-	conn.SetReadLimit(maxFrameBytes)
+	interval, err := t.helloHandshake(conn)
+	if err != nil {
+		return err
+	}
+	stale := staleTimeout(interval, t.opts.StaleTimeout)
+	write := writeFrame(conn)
 
-	var writeMu sync.Mutex
-	write := func(v any) error {
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-		if err := conn.WriteJSON(v); err != nil {
-			// 写失败通常意味着连接半死：主动关闭以打断读循环，尽快走重连。
-			_ = conn.Close()
-			return err
-		}
-		return nil
-	}
-
-	// 1) Hello（op=10）拿心跳间隔。
-	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-	var hello struct {
-		Op int `json:"op"`
-		D  struct {
-			HeartbeatInterval int `json:"heartbeat_interval"`
-		} `json:"d"`
-	}
-	if err := conn.ReadJSON(&hello); err != nil {
-		return readError(err)
-	}
-	if hello.Op != 10 {
-		return fmt.Errorf("ws: 期望 hello(op=10)，实际 op=%d", hello.Op)
-	}
-	_ = conn.SetReadDeadline(time.Time{}) // 读超时改由读循环按帧重设（见下）
-
-	interval := t.opts.HeartbeatInterval
-	if interval <= 0 {
-		interval = time.Duration(hello.D.HeartbeatInterval) * time.Millisecond
-	}
-	if interval <= 0 {
-		interval = defaultHeartbeat
-	}
-
-	// 读空闲判死阈值：超过没读到任何帧就主动断开重连。
-	stale := t.opts.StaleTimeout
-	if stale <= 0 {
-		stale = 2 * interval
-		// 下限按"一个心跳周期 + 宽限"取，不能只跟 10s 比：心跳间隔很大时
-		// 固定下限会让判死阈值小于一个心跳周期，连接必然被误杀。
-		if floor := interval + minStaleGrace; stale < floor {
-			stale = floor
-		}
-		// 上限只压缩"默认放大"，且不得小于一个心跳周期。
-		if stale > maxStale && interval < maxStale {
-			stale = maxStale
-		}
-	}
-
-	// 2) Identify 或 Resume。
 	sess, resume := t.loadSession(ctx)
-	if resume {
-		if err := write(map[string]any{"op": 6, "d": map[string]any{
-			"token": "QQBot " + token, "session_id": sess.SessionID, "seq": sess.Seq,
-		}}); err != nil {
-			return fmt.Errorf("ws: resume: %w", err)
-		}
-	} else {
-		if err := write(map[string]any{"op": 2, "d": map[string]any{
-			"token":      "QQBot " + token,
-			"intents":    t.opts.Intents,
-			"shard":      []int{t.opts.Shard.Index, t.opts.Shard.Count},
-			"properties": map[string]string{"$os": runtime.GOOS, "$browser": "qqbot-sdk", "$device": "qqbot-sdk"},
-		}}); err != nil {
-			return fmt.Errorf("ws: identify: %w", err)
-		}
+	if err := t.identifyOrResume(write, token, sess, resume); err != nil {
+		return err
 	}
 	// 握手已发出：连接恢复，Resume 窗口重新计时。
 	t.resumeUntil = time.Time{}
 
-	// 3) 心跳协程（seq 有并发读写，统一走 seqFn）。
+	// 心跳协程（seq 有并发读写，统一走 seqFn）。
 	var seqMu sync.Mutex
 	seqFn := func() int64 {
 		seqMu.Lock()
@@ -440,77 +343,175 @@ func (t *Transport) connectOnce(ctx context.Context, emit func(*event.Event) err
 	defer hbCancel()
 	go t.heartbeat(hbCtx, write, interval, seqFn)
 
+	return t.readLoop(ctx, conn, stale, &sess, &seqMu, emit)
+}
+
+// gatewayAddr 决定本次连接用哪个 wss 地址：显式配置优先，否则向平台换。
+func (t *Transport) gatewayAddr(ctx context.Context, token string) (string, error) {
+	if t.opts.GatewayURL != "" {
+		return t.opts.GatewayURL, nil
+	}
+	if !t.opts.GatewayBot {
+		return t.gatewayURL(ctx, token)
+	}
+	info, err := t.getGateway(ctx, token, t.opts.GatewayEndpoint+"/bot")
+	if err != nil {
+		return "", err
+	}
+	t.logGatewayHint(info)
+	return info.URL, nil
+}
+
+// logGatewayHint 记录平台的分片建议与 session 限额（纯可观测性，不参与决策）。
+func (t *Transport) logGatewayHint(info *GatewayBotInfo) {
+	if info.Shards > 0 && t.opts.Shard.Count == 1 && info.Shards > 1 {
+		t.opts.Logger.Warn("平台建议的分片数大于当前配置，单分片可能承载不稳",
+			"recommended_shards", info.Shards, "configured", t.opts.Shard.Count)
+	}
+	if info.SessionStartLimit.Total > 0 {
+		t.opts.Logger.Info("gateway session 限额",
+			"total", info.SessionStartLimit.Total,
+			"remaining", info.SessionStartLimit.Remaining,
+			"reset_after_ms", info.SessionStartLimit.ResetAfter)
+	}
+}
+
+// dial 拨号并返回清理函数；ctx 取消时由旁路 goroutine 打断阻塞读。
+func (t *Transport) dial(ctx context.Context, url string) (*websocket.Conn, func(), error) {
+	header := http.Header{"User-Agent": []string{userAgent}}
+	conn, resp, err := t.opts.Dialer.DialContext(ctx, url, header)
+	if err != nil {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		return nil, nil, fmt.Errorf("ws: dial: %w", err)
+	}
+	// 读帧上限：防异常大帧打爆内存（网关正常事件远小于此）。
+	conn.SetReadLimit(maxFrameBytes)
+
+	closeDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close() // ctx 取消时打断阻塞读
+		case <-closeDone:
+		}
+	}()
+	return conn, func() {
+		_ = conn.Close()
+		close(closeDone)
+	}, nil
+}
+
+// helloHandshake 读 Hello（op=10）并返回心跳间隔；之后的读超时由 readLoop 按帧重设。
+func (t *Transport) helloHandshake(conn *websocket.Conn) (time.Duration, error) {
+	_ = conn.SetReadDeadline(time.Now().Add(helloTimeout))
+	var hello struct {
+		Op int `json:"op"`
+		D  struct {
+			HeartbeatInterval int `json:"heartbeat_interval"`
+		} `json:"d"`
+	}
+	if err := conn.ReadJSON(&hello); err != nil {
+		return 0, readError(err)
+	}
+	if hello.Op != 10 {
+		return 0, fmt.Errorf("ws: 期望 hello(op=10)，实际 op=%d", hello.Op)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	return heartbeatInterval(t.opts.HeartbeatInterval, hello.D.HeartbeatInterval), nil
+}
+
+// heartbeatInterval 定心跳周期：显式配置 > Hello 下发 > 默认 30s。
+func heartbeatInterval(override time.Duration, helloMS int) time.Duration {
+	if override > 0 {
+		return override
+	}
+	if d := time.Duration(helloMS) * time.Millisecond; d > 0 {
+		return d
+	}
+	return defaultHeartbeat
+}
+
+// staleTimeout 定读空闲判死阈值：显式配置优先；否则 2×心跳，
+// 下限取"一个心跳 + 宽限"（不能只跟固定值比：心跳很大时固定下限会小于一个心跳周期，
+// 连接必然被误杀），上限只压缩"默认放大"且不得小于一个心跳周期。
+func staleTimeout(interval, override time.Duration) time.Duration {
+	if override > 0 {
+		return override
+	}
+	stale := 2 * interval
+	if floor := interval + minStaleGrace; stale < floor {
+		stale = floor
+	}
+	if stale > maxStale && interval < maxStale {
+		stale = maxStale
+	}
+	return stale
+}
+
+// writeFrame 返回串行化的写帧函数：写失败通常意味着连接半死，
+// 主动关闭以打断读循环，尽快走重连。
+func writeFrame(conn *websocket.Conn) func(any) error {
+	var mu sync.Mutex
+	return func(v any) error {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+		if err := conn.WriteJSON(v); err != nil {
+			_ = conn.Close()
+			return err
+		}
+		return nil
+	}
+}
+
+// identifyOrResume 按会话状态发 op=6（Resume）或 op=2（Identify）。
+func (t *Transport) identifyOrResume(write func(any) error, token string, sess Session, resume bool) error {
+	if resume {
+		if err := write(map[string]any{"op": 6, "d": map[string]any{
+			"token": qqtypes.AuthPrefix + token, "session_id": sess.SessionID, "seq": sess.Seq,
+		}}); err != nil {
+			return fmt.Errorf("ws: resume: %w", err)
+		}
+		return nil
+	}
+	if err := write(map[string]any{"op": 2, "d": map[string]any{
+		"token":      qqtypes.AuthPrefix + token,
+		"intents":    t.opts.Intents,
+		"shard":      []int{t.opts.Shard.Index, t.opts.Shard.Count},
+		"properties": map[string]string{"$os": runtime.GOOS, "$browser": "qqbot-sdk", "$device": "qqbot-sdk"},
+	}}); err != nil {
+		return fmt.Errorf("ws: identify: %w", err)
+	}
+	return nil
+}
+
+// readLoop 消费下行帧直到断开：op0 事件交给 handleEventFrame，
+// op7（要求重连）与 op9（session 失效）以哨兵错误交给 Run。
+func (t *Transport) readLoop(ctx context.Context, conn *websocket.Conn, stale time.Duration, sess *Session, seqMu *sync.Mutex, emit func(*event.Event) error) error {
 	// idWarned 记录本连接内已告警过「缺外层 id」的消息类型。按类型去重而不是一个布尔：
 	// 平台若只对某一类消息漏 id，另一类的问题不该被前一条告警吞掉；类型总数上限就是
 	// IsMessageType 认的三种，表不会长。
 	idWarned := make(map[event.Type]bool, 3)
 
-	// 4) 读事件循环（每帧前重设读超时，靠 StaleTimeout 判死）。
+	// 每帧前重设读超时，靠 stale 判死。
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(stale))
 		_, frameBytes, err := conn.ReadMessage()
 		if err != nil {
 			return readError(err)
 		}
-		var frame struct {
-			Op int             `json:"op"`
-			S  int64           `json:"s"`
-			T  string          `json:"t"`
-			ID string          `json:"id"`
-			D  json.RawMessage `json:"d"`
-		}
+		var frame gatewayFrame
 		if err := json.Unmarshal(frameBytes, &frame); err != nil {
 			t.opts.Logger.Warn("ws 事件帧 JSON 非法（跳过）", "err", err)
 			continue
 		}
 		switch frame.Op {
 		case 0: // 事件分发
-			// 外层 id 是消息事件的必需品（去重、event_id 被动回复都靠它）；READY/RESUMED
-			// 这类控制帧本来就没 id，不能当成「去重能力缺失」的证据。判定因此落在事件语义
-			// （IsMessageType）上，而不是「这一帧有没有 id」。
-			if typ := event.Type(frame.T); frame.ID == "" && event.IsMessageType(typ) && !idWarned[typ] {
-				idWarned[typ] = true
-				t.opts.Logger.Warn("ws 消息事件缺少外层 id：去重与 event_id 被动回复将不可用", "type", frame.T)
-			}
-			seqMu.Lock()
-			if frame.S != 0 {
-				sess.Seq = frame.S
-			}
-			if frame.T == "READY" {
-				var ready struct {
-					SessionID string `json:"session_id"`
-				}
-				if err := json.Unmarshal(frame.D, &ready); err == nil && ready.SessionID != "" {
-					sess.SessionID = ready.SessionID
-				}
-			}
-			snapshot := sess
-			seqMu.Unlock()
-			// 把网关帧组装成 Envelope 直接走 ParseEnvelope：省掉「marshal 回 JSON
-			// 再整体 unmarshal」的一轮重复编解码。
-			env := event.Envelope{ID: frame.ID, Op: frame.Op, S: frame.S, T: frame.T, D: frame.D}
-			ev, err := event.ParseEnvelope(&env)
-			if err != nil {
-				// 坏帧不重投：先持久化 seq 再跳过，否则每次重连都会卡在同一帧。
-				t.saveSession(ctx, snapshot)
-				t.opts.Logger.Warn("ws 事件解析失败（保留连接）", "err", err, "type", frame.T)
-				continue
-			}
-			if t.opts.Dedupe != nil && ev.ID != "" {
-				first, dedupeErr := t.opts.Dedupe(ctx, ev.ID)
-				if dedupeErr != nil {
-					t.opts.Logger.Warn("ws 事件去重失败（继续处理）", "err", dedupeErr, "event_id", ev.ID)
-				} else if !first {
-					t.saveSession(ctx, snapshot)
-					continue
-				}
-			}
-			// 必须在投递成功之后再持久化 seq：先落盘会让 emit 失败的那一条
-			// 在 Resume 时被当作"已消费"跳过，造成永久丢事件。
-			if err := emit(ev); err != nil {
+			if err := t.handleEventFrame(ctx, frame, sess, seqMu, idWarned, emit); err != nil {
 				return err
 			}
-			t.saveSession(ctx, snapshot)
 		case 7: // 平台要求重连
 			return errReconnect
 		case 9: // session 失效：清掉，下次重新 Identify
@@ -520,6 +521,68 @@ func (t *Transport) connectOnce(ctx context.Context, emit func(*event.Event) err
 			continue
 		}
 	}
+}
+
+// gatewayFrame 是网关下行帧的外层结构。
+type gatewayFrame struct {
+	Op int             `json:"op"`
+	S  int64           `json:"s"`
+	T  string          `json:"t"`
+	ID string          `json:"id"`
+	D  json.RawMessage `json:"d"`
+}
+
+// handleEventFrame 处理一帧事件：推进 seq/session、解析、去重、投递、落盘。
+// 返回非 nil 只表示投递失败（要断开连接）；解析与去重的问题都就地消化。
+func (t *Transport) handleEventFrame(ctx context.Context, frame gatewayFrame, sess *Session, seqMu *sync.Mutex, idWarned map[event.Type]bool, emit func(*event.Event) error) error {
+	// 外层 id 是消息事件的必需品（去重、event_id 被动回复都靠它）；READY/RESUMED
+	// 这类控制帧本来就没 id，不能当成「去重能力缺失」的证据。判定因此落在事件语义
+	// （IsMessageType）上，而不是「这一帧有没有 id」。
+	if typ := event.Type(frame.T); frame.ID == "" && event.IsMessageType(typ) && !idWarned[typ] {
+		idWarned[typ] = true
+		t.opts.Logger.Warn("ws 消息事件缺少外层 id：去重与 event_id 被动回复将不可用", "type", frame.T)
+	}
+	seqMu.Lock()
+	if frame.S != 0 {
+		sess.Seq = frame.S
+	}
+	if frame.T == "READY" {
+		var ready struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal(frame.D, &ready); err == nil && ready.SessionID != "" {
+			sess.SessionID = ready.SessionID
+		}
+	}
+	snapshot := *sess
+	seqMu.Unlock()
+
+	// 把网关帧组装成 Envelope 直接走 ParseEnvelope：省掉「marshal 回 JSON
+	// 再整体 unmarshal」的一轮重复编解码。
+	env := event.Envelope{ID: frame.ID, Op: frame.Op, S: frame.S, T: frame.T, D: frame.D}
+	ev, err := event.ParseEnvelope(&env)
+	if err != nil {
+		// 坏帧不重投：先持久化 seq 再跳过，否则每次重连都会卡在同一帧。
+		t.saveSession(ctx, snapshot)
+		t.opts.Logger.Warn("ws 事件解析失败（保留连接）", "err", err, "type", frame.T)
+		return nil
+	}
+	if t.opts.Dedupe != nil && ev.ID != "" {
+		first, dedupeErr := t.opts.Dedupe(ctx, ev.ID)
+		if dedupeErr != nil {
+			t.opts.Logger.Warn("ws 事件去重失败（继续处理）", "err", dedupeErr, "event_id", ev.ID)
+		} else if !first {
+			t.saveSession(ctx, snapshot)
+			return nil
+		}
+	}
+	// 必须在投递成功之后再持久化 seq：先落盘会让 emit 失败的那一条
+	// 在 Resume 时被当作"已消费"跳过，造成永久丢事件。
+	if err := emit(ev); err != nil {
+		return err
+	}
+	t.saveSession(ctx, snapshot)
+	return nil
 }
 
 // readError 把 gorilla 的关闭帧错误归一成带 code 的 wsCloseError（其余保持原样包装）。
