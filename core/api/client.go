@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kissqianfu/QQ-SDK/common/token"
+	"github.com/kissqianfu/QQ-SDK/core/token"
 )
 
 const (

@@ -1,6 +1,6 @@
 package qqbot
 
-// lifecycle_extra_test.go 覆盖生命周期回归：重复 Run 不 panic，Close 后 Run 返回 nil。
+// lifecycle_test.go 覆盖门面生命周期：重复 Run 不 panic、Close 后 Run 返回 nil、无 Transport 时事件通道关闭。
 
 import (
 	"context"

@@ -1,8 +1,7 @@
 package api
 
-// protocol_extra_test.go 覆盖 2026-10 文档新增/修正的协议字段：
-// is_wakeup、force_verify_image_resource、action.anchor、permission.specify_role_ids、
-// 撤回消息（DELETE）、输入中状态（msg_type=6）。
+// message_test.go 覆盖出站消息的协议字段：is_wakeup、force_verify_image_resource、
+// keyboard 的 action.anchor 与 permission.specify_role_ids、撤回（DELETE）、输入中状态（msg_type=6）。
 
 import (
 	"context"
@@ -11,9 +10,9 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/kissqianfu/QQ-SDK/common/token"
 	"github.com/kissqianfu/QQ-SDK/core/event"
 	"github.com/kissqianfu/QQ-SDK/core/send"
+	"github.com/kissqianfu/QQ-SDK/core/token"
 )
 
 func TestSendIsWakeupAndForceVerifyImage(t *testing.T) {
@@ -170,30 +169,5 @@ func TestInputNotify(t *testing.T) {
 	// 超过 60 秒：本地拒绝。
 	if err := c.InputNotify(context.Background(), "u1", "msg-1", 1, 61); err == nil {
 		t.Fatal("InputNotify(61s) error = nil, want error")
-	}
-}
-
-func TestStartStreamDefaultsContentType(t *testing.T) {
-	var gotBody map[string]any
-	srv := testServer(t, func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/app/getAppAccessToken":
-			writeJSON(w, 200, `{"access_token":"tok","expires_in":7200}`)
-		case "/v2/users/u1/stream_messages":
-			_ = json.NewDecoder(r.Body).Decode(&gotBody)
-			writeJSON(w, 200, `{"id":"stream-1","timestamp":"2026-07-21T10:30:00+08:00"}`)
-		default:
-			t.Errorf("unexpected path %q", r.URL.Path)
-		}
-	})
-	c := newClient(t, srv, token.NewMemory())
-
-	if _, err := c.StartStream(context.Background(),
-		Target{Scene: event.SceneC2C, ID: "u1"}, "正在生成", StreamConfig{MsgID: "msg-1"}); err != nil {
-		t.Fatalf("StartStream() error = %v", err)
-	}
-	if gotBody["content_type"] != StreamText {
-		t.Fatalf("content_type = %v, want %q（空值必须归一化，不能原样下发）",
-			gotBody["content_type"], StreamText)
 	}
 }

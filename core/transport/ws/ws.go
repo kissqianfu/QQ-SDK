@@ -16,10 +16,10 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/kissqianfu/QQ-SDK/common/qqtypes"
-	"github.com/kissqianfu/QQ-SDK/common/version"
 	"github.com/kissqianfu/QQ-SDK/core/event"
+	"github.com/kissqianfu/QQ-SDK/core/qqtypes"
 	"github.com/kissqianfu/QQ-SDK/core/transport"
+	"github.com/kissqianfu/QQ-SDK/core/version"
 )
 
 // userAgent 统一 UA，版本随 VERSION 走。

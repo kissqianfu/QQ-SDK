@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kissqianfu/QQ-SDK/common/token"
+	"github.com/kissqianfu/QQ-SDK/core/token"
 )
 
 // fakeStrategyServer 记录请求方法与 body，按路径返回固定响应。

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kissqianfu/QQ-SDK/common/token"
 	"github.com/kissqianfu/QQ-SDK/core/event"
 	"github.com/kissqianfu/QQ-SDK/core/send"
+	"github.com/kissqianfu/QQ-SDK/core/token"
 )
 
 func TestPost5xxNotRetriedByDefault(t *testing.T) {

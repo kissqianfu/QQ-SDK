@@ -8,8 +8,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/kissqianfu/QQ-SDK/common/qqtypes"
 	"github.com/kissqianfu/QQ-SDK/core/event"
+	"github.com/kissqianfu/QQ-SDK/core/qqtypes"
 	"github.com/kissqianfu/QQ-SDK/core/send"
 )
 

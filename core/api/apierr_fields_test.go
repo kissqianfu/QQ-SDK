@@ -1,6 +1,6 @@
 package api
 
-// apierr_shape_test.go 锁定平台错误体字段口径：err_code 优先，code 兼容。
+// apierr_fields_test.go 锁定平台错误体字段口径：err_code 优先，code 兼容。
 
 import (
 	"context"
@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/kissqianfu/QQ-SDK/common/apierr"
-	"github.com/kissqianfu/QQ-SDK/common/token"
+	"github.com/kissqianfu/QQ-SDK/core/apierr"
 	"github.com/kissqianfu/QQ-SDK/core/event"
 	"github.com/kissqianfu/QQ-SDK/core/send"
+	"github.com/kissqianfu/QQ-SDK/core/token"
 )
 
 func TestAPIErrorReadsErrCode(t *testing.T) {

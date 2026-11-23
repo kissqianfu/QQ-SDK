@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/kissqianfu/QQ-SDK/common/qqtypes"
+	"github.com/kissqianfu/QQ-SDK/core/qqtypes"
 )
 
 // Envelope 是平台回调 / 网关消息的外层结构（webhook 与 ws 共用一份定义）。

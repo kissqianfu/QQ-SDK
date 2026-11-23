@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kissqianfu/QQ-SDK/common/apierr"
-	"github.com/kissqianfu/QQ-SDK/common/token"
+	"github.com/kissqianfu/QQ-SDK/core/apierr"
 	"github.com/kissqianfu/QQ-SDK/core/event"
 	"github.com/kissqianfu/QQ-SDK/core/send"
+	"github.com/kissqianfu/QQ-SDK/core/token"
 )
 
 // fakeClock 是可推进的时钟。

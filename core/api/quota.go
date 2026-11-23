@@ -4,9 +4,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kissqianfu/QQ-SDK/common/apierr"
-	"github.com/kissqianfu/QQ-SDK/common/qqtypes"
+	"github.com/kissqianfu/QQ-SDK/core/apierr"
 	"github.com/kissqianfu/QQ-SDK/core/event"
+	"github.com/kissqianfu/QQ-SDK/core/qqtypes"
 )
 
 // 本文件是出站主动消息三层配额的唯一实现（全局桶 / 单关系桶 / 日上限）。

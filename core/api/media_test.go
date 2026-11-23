@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kissqianfu/QQ-SDK/common/token"
 	"github.com/kissqianfu/QQ-SDK/core/event"
+	"github.com/kissqianfu/QQ-SDK/core/token"
 )
 
 func TestUploadFile(t *testing.T) {

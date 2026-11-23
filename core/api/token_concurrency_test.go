@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kissqianfu/QQ-SDK/common/token"
+	"github.com/kissqianfu/QQ-SDK/core/token"
 )
 
 func TestTokenSingleflightConcurrent(t *testing.T) {

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kissqianfu/QQ-SDK/common/token"
 	"github.com/kissqianfu/QQ-SDK/core/event"
+	"github.com/kissqianfu/QQ-SDK/core/token"
 )
 
 // seededToken 预置有效 token：否则首次取 token 的请求也会打到 catch-all 测试服务器，
@@ -241,5 +241,31 @@ func TestStreamFrameTimestampRFC3339(t *testing.T) {
 	}
 	if frame.RemainMsgLen != 9 {
 		t.Fatalf("RemainMsgLen = %d, want 9", frame.RemainMsgLen)
+	}
+}
+
+// 流式首帧的 content_type 不能原样下发空值：平台要求显式给 text/markdown。
+func TestStartStreamDefaultsContentType(t *testing.T) {
+	var gotBody map[string]any
+	srv := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app/getAppAccessToken":
+			writeJSON(w, 200, `{"access_token":"tok","expires_in":7200}`)
+		case "/v2/users/u1/stream_messages":
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			writeJSON(w, 200, `{"id":"stream-1","timestamp":"2026-07-21T10:30:00+08:00"}`)
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+	})
+	c := newClient(t, srv, token.NewMemory())
+
+	if _, err := c.StartStream(context.Background(),
+		Target{Scene: event.SceneC2C, ID: "u1"}, "正在生成", StreamConfig{MsgID: "msg-1"}); err != nil {
+		t.Fatalf("StartStream() error = %v", err)
+	}
+	if gotBody["content_type"] != StreamText {
+		t.Fatalf("content_type = %v, want %q（空值必须归一化，不能原样下发）",
+			gotBody["content_type"], StreamText)
 	}
 }

@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/kissqianfu/QQ-SDK/common/qqtypes"
 	"github.com/kissqianfu/QQ-SDK/core/event"
+	"github.com/kissqianfu/QQ-SDK/core/qqtypes"
 	"github.com/kissqianfu/QQ-SDK/core/transport"
 	"github.com/kissqianfu/QQ-SDK/core/transport/webhook"
 	"github.com/kissqianfu/QQ-SDK/core/transport/ws"

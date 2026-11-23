@@ -16,10 +16,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kissqianfu/QQ-SDK/common/apierr"
-	"github.com/kissqianfu/QQ-SDK/common/qqtypes"
-	"github.com/kissqianfu/QQ-SDK/common/token"
-	"github.com/kissqianfu/QQ-SDK/common/version"
+	"github.com/kissqianfu/QQ-SDK/core/apierr"
+	"github.com/kissqianfu/QQ-SDK/core/qqtypes"
+	"github.com/kissqianfu/QQ-SDK/core/token"
+	"github.com/kissqianfu/QQ-SDK/core/version"
 )
 
 // errBodyTooLarge 表示响应体超过 maxBody。

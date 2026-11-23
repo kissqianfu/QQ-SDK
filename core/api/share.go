@@ -1,6 +1,6 @@
 package api
 
-// misc.go 是"机器人"域的零散接口：分享链接等不属于消息/群管理/菜单的小能力。
+// share.go 是机器人分享链接（url_link）能力：与消息、群管理、菜单无关，单独成文件。
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"unicode/utf8"
 
-	"github.com/kissqianfu/QQ-SDK/common/apierr"
+	"github.com/kissqianfu/QQ-SDK/core/apierr"
 )
 
 // maxCallbackData 是 share link 的 callback_data 上限（官方 32 字符）。

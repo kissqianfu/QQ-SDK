@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kissqianfu/QQ-SDK/common/apierr"
-	"github.com/kissqianfu/QQ-SDK/common/token"
+	"github.com/kissqianfu/QQ-SDK/core/apierr"
 	"github.com/kissqianfu/QQ-SDK/core/event"
 	"github.com/kissqianfu/QQ-SDK/core/send"
+	"github.com/kissqianfu/QQ-SDK/core/token"
 )
 
 // fakeStore 记录 Set 的 ttl，用于验证"提前 90s 过期"。

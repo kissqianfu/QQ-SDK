@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kissqianfu/QQ-SDK/common/token"
+	"github.com/kissqianfu/QQ-SDK/core/token"
 )
 
 func TestMenuGetPut(t *testing.T) {

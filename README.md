@@ -46,6 +46,22 @@ QQ 官方机器人接入层 SDK（Go）：零业务依赖、可整体拆卸替�
 - **失败语义可判**：重复消息、锚点过期、限流、鉴权失效各有判定方法，不用比对字符串。
 - **锚点显式传**：被动回复的 `msg_id` / `event_id` 二选一不猜；`SendReply` 在锚点被拒时自动降级。
 
+## 包结构
+
+依赖只允许向下，无横向回环；叶子包不引用同模块其它包。
+
+```
+qqbot/              门面：Config / Run / Events / Close
+core/api/           REST 调用（含配额、限次、401 换票）
+core/event/         事件解析与类型
+core/send/          出站消息构造与校验（零依赖叶子）
+core/transport/     通道契约 + ws/ 与 webhook/ 两实现
+core/apierr/        平台错误码与判定（叶子）
+core/token/         access_token 存储接口与内存实现（叶子）
+core/qqtypes/       QQ 域公共类型：Scene / openid 归一 / 先进先出淘汰（叶子）
+core/version/       版本号与 UA（叶子）
+```
+
 ## 安装
 
 ```bash

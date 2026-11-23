@@ -1,6 +1,6 @@
 package event
 
-// anchors_extra_test.go 锁定"被动回复 event_id 锚点"的支持事件集合（官方文档口径）。
+// anchor_support_test.go 锁定"被动回复 event_id 锚点"的支持事件集合（官方文档口径）。
 
 import "testing"
 

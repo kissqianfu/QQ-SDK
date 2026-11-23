@@ -7,8 +7,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/kissqianfu/QQ-SDK/common/token"
 	"github.com/kissqianfu/QQ-SDK/core/api"
+	"github.com/kissqianfu/QQ-SDK/core/token"
 	"github.com/kissqianfu/QQ-SDK/core/transport"
 	"github.com/kissqianfu/QQ-SDK/core/transport/webhook"
 	"github.com/kissqianfu/QQ-SDK/core/transport/ws"

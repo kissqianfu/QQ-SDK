@@ -1,6 +1,6 @@
 package event
 
-// newfields_test.go 覆盖 2026-08/09/10 文档新增的事件字段（入群申请/互动 resolved/订阅状态等）。
+// parse_fields_test.go 覆盖各事件类型的字段解析：入群申请/互动 resolved/订阅状态/好友来源/群成员昵称等。
 
 import "testing"
 

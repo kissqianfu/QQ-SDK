@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kissqianfu/QQ-SDK/common/token"
 	"github.com/kissqianfu/QQ-SDK/core/event"
+	"github.com/kissqianfu/QQ-SDK/core/token"
 )
 
 // noServerClient 构造一个 BaseURL 不可达的客户端：用于断言"本地校验先于发请求"。
