@@ -60,3 +60,61 @@ func TestParseTimeThreshold(t *testing.T) {
 		t.Fatalf("超大时间戳应判脏数据: %v", got)
 	}
 }
+
+// FirstNonEmpty 被各处用于"取第一个有效值"的兜底，纯空白必须当作空处理，
+// 否则一份 "  " 会顶掉后面真实的 openid/群号。
+func TestFirstNonEmpty(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want string
+	}{
+		{"取第一个非空", []string{"", "a", "b"}, "a"},
+		{"跳过纯空白", []string{"  ", "\t\n", "c"}, "c"},
+		{"返回去空白后的值", []string{"  d  "}, "d"},
+		{"全空返回空串", []string{"", "   "}, ""},
+		{"无参数返回空串", nil, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := FirstNonEmpty(tt.in...); got != tt.want {
+				t.Fatalf("FirstNonEmpty(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// EvictFIFO 是"键表到上限就淘汰"的共用实现：必须删掉最早入表且仍在表里的键，
+// 并跳过已被外部清掉的键，否则淘汰会退化成空转、表继续涨。
+func TestEvictFIFO(t *testing.T) {
+	t.Run("淘汰最早的键", func(t *testing.T) {
+		m := map[string]int{"a": 1, "b": 2, "c": 3}
+		order := EvictFIFO(m, []string{"a", "b", "c"})
+		if _, ok := m["a"]; ok {
+			t.Fatal("a 应被淘汰")
+		}
+		if got, want := len(order), 2; got != want {
+			t.Fatalf("剩余顺序表长度 = %d, want %d", got, want)
+		}
+		if order[0] != "b" || order[1] != "c" {
+			t.Fatalf("顺序表 = %v, want [b c]", order)
+		}
+	})
+
+	t.Run("跳过已不在表里的键", func(t *testing.T) {
+		m := map[string]int{"c": 3}
+		order := EvictFIFO(m, []string{"a", "b", "c"})
+		if _, ok := m["c"]; ok {
+			t.Fatal("c 应被淘汰（a、b 已不存在，跳过）")
+		}
+		if len(order) != 0 {
+			t.Fatalf("顺序表 = %v, want 空", order)
+		}
+	})
+
+	t.Run("空表只返回空顺序表", func(t *testing.T) {
+		if got := EvictFIFO(map[string]int{}, nil); len(got) != 0 {
+			t.Fatalf("顺序表 = %v, want 空", got)
+		}
+	})
+}
