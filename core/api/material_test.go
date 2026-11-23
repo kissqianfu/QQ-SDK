@@ -131,3 +131,32 @@ func TestMaterialValidationAndListDelete(t *testing.T) {
 		t.Fatal("空 image_id 应该报错")
 	}
 }
+
+// 预签名地址是平台响应里的外部输入：scheme/主机/用户信息/元数据端点都必须拦住，
+// 但正常的 http(s) 与回环（宿主指向本机 mock）要放行。
+func TestValidateUploadURL(t *testing.T) {
+	ok := []string{
+		"https://cos.ap-guangzhou.myqcloud.com/upload",
+		"http://127.0.0.1:8080/cos/upload",
+		"https://[2001:db8::1]/upload",
+	}
+	for _, raw := range ok {
+		if err := validateUploadURL(raw); err != nil {
+			t.Errorf("validateUploadURL(%q) = %v, want nil", raw, err)
+		}
+	}
+	bad := []string{
+		"",                          // 空串
+		"file:///etc/passwd",        // 非 http(s)
+		"gopher://example.com/x",    // 非 http(s)
+		"https:///upload",           // 缺主机
+		"https://u:p@cos.example/x", // 带用户信息
+		"http://169.254.169.254/latest/meta-data/", // 云元数据
+		"http://0.0.0.0/upload",                    // 未指定地址
+	}
+	for _, raw := range bad {
+		if err := validateUploadURL(raw); err == nil {
+			t.Errorf("validateUploadURL(%q) = nil, want error", raw)
+		}
+	}
+}

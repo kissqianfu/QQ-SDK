@@ -9,7 +9,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -85,11 +87,38 @@ func (c *Client) MaterialPrepare(ctx context.Context, fileName, contentType stri
 	return &out, nil
 }
 
+// validateUploadURL 校验预签名上传地址。地址来自平台响应，属于外部输入，不能直接拿去发请求：
+// 只允许 http/https、必须带主机名、不允许用户信息，并拒绝链路本地/未指定地址
+// （169.254.169.254 这类云元数据端点是 SSRF 的典型跳板）。回环地址放行：宿主可能指向
+// 本机 mock 或代理，且它只打到宿主自己，不构成跨边界 SSRF。
+func validateUploadURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("api: 预签名地址无法解析: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("api: 预签名地址 scheme 必须是 http/https，实得 %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("api: 预签名地址缺少主机名")
+	}
+	if u.User != nil {
+		return fmt.Errorf("api: 预签名地址不允许携带用户信息")
+	}
+	if ip := net.ParseIP(u.Hostname()); ip != nil && (ip.IsLinkLocalUnicast() || ip.IsUnspecified()) {
+		return fmt.Errorf("api: 预签名地址指向链路本地/未指定地址 %s，拒绝上传", ip)
+	}
+	return nil
+}
+
 // MaterialPut 用预签名 URL 直传图片二进制，返回 COS ETag（去掉引号，即文件 MD5）。
 // Content-Type 必须与 prepare 时声明的一致，否则 COS 返回 403；传输错误/5xx 重试。
 func (c *Client) MaterialPut(ctx context.Context, presignedURL, contentType string, data []byte) (string, error) {
 	if presignedURL == "" {
 		return "", fmt.Errorf("api: material presigned_url 不能为空")
+	}
+	if err := validateUploadURL(presignedURL); err != nil {
+		return "", err
 	}
 	if len(data) == 0 {
 		return "", fmt.Errorf("api: material 数据不能为空")
