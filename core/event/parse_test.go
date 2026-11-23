@@ -304,6 +304,21 @@ func TestParseNewEventTypes(t *testing.T) {
 	}
 }
 
+// 消息事件的事件体必须是"有内容的对象"：{ } / 纯换行 这类空白形态也算空壳，
+// 否则会产出一条 MsgID 为空、发送必然失败的幽灵事件。
+func TestMessageEventEmptyPayloadVariants(t *testing.T) {
+	for _, d := range []string{`null`, `{}`, `{ }`, "{\n}", "{\t}"} {
+		raw := `{"id":"EV-1","op":0,"t":"C2C_MESSAGE_CREATE","d":` + d + `}`
+		if _, err := Parse([]byte(raw)); err == nil {
+			t.Fatalf("d=%q 应被判定为空事件体", d)
+		}
+	}
+	// 有内容的对象仍要能解析。
+	if _, err := Parse([]byte(`{"id":"EV-2","op":0,"t":"C2C_MESSAGE_CREATE","d":{"content":"hi"}}`)); err != nil {
+		t.Fatalf("正常事件体被拒：%v", err)
+	}
+}
+
 func TestParseTimestampFormats(t *testing.T) {
 	tests := []struct {
 		name string

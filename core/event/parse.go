@@ -35,37 +35,19 @@ func ParseEnvelope(env *Envelope) (*Event, error) {
 	if env == nil {
 		return nil, fmt.Errorf("event: nil envelope")
 	}
-	if env.T == "" {
-		return nil, fmt.Errorf("event: missing event type (t)")
+	d, err := decodeEventData(env)
+	if err != nil {
+		return nil, err
 	}
 
-	var d dispatchData
-	if len(env.D) > 0 {
-		if err := json.Unmarshal(env.D, &d); err != nil {
-			// 消息类事件 d 坏了必须报错；控制事件容忍（RESUMED 等的 d 是字符串/空）。
-			if IsMessageType(Type(env.T)) {
-				return nil, fmt.Errorf("event: decode %s payload: %w", env.T, err)
-			}
-		}
-	}
-	// "d":null / "d":{} / 空 d 对消息事件同样解码成功，但会产出空壳幽灵事件：
-	// 业务回复必然失败，且错误被推迟到发送阶段才发现。只拦"完全空"，不要求每个字段都在
-	// （平台会按场景省略字段，过度校验会把真事件也拒掉）。
-	if IsMessageType(Type(env.T)) {
-		trimmed := bytes.TrimSpace(env.D)
-		if len(trimmed) == 0 || string(trimmed) == "null" || string(trimmed) == "{}" {
-			return nil, fmt.Errorf("event: %s 的事件体为空（d 缺失/null/{}）", env.T)
-		}
-	}
-
+	// 场景判定：默认按事件类型前缀；互动事件按 d.scene（官方字段：c2c=单聊, group=群聊）。
 	ev := &Event{
 		ID:          env.ID,
 		Type:        Type(env.T),
 		MessageType: d.MessageType,
+		Scene:       sceneOf(env.T),
+		AtMe:        env.T == string(GroupAtMessageCreate),
 	}
-	// 场景判定：默认按事件类型前缀；互动事件按 d.scene（官方字段：c2c=单聊, group=群聊）。
-	ev.Scene = sceneOf(env.T)
-	ev.AtMe = env.T == string(GroupAtMessageCreate)
 
 	// 被动回复锚点是事件最外层的 id，不要用 d.id（互动事件的 d.id 是裸 interaction_id）。
 	// Event.ID/EventID = 外层 id；Event.InteractionID = 裸 interaction_id（回应专用）。
@@ -73,41 +55,13 @@ func ParseEnvelope(env *Envelope) (*Event, error) {
 		ev.EventID = env.ID
 	}
 	if ev.Type == InteractionCreate {
-		// 官方注明 interaction_id 不带 "INTERACTION_CREATE:" 前缀；历史事件出现过带前缀形态，防御性剥掉。
-		ev.InteractionID = strings.TrimPrefix(qqtypes.FirstNonEmpty(d.ID, env.ID), "INTERACTION_CREATE:")
-		ev.InteractionType = d.InteractionType
-		if s := sceneFromString(d.sceneValue()); s != 0 {
-			ev.Scene = s
-		} else if d.ChatType == 1 {
-			ev.Scene = SceneGroup
-		} else if d.ChatType == 2 {
-			ev.Scene = SceneC2C
-		}
-		ev.GroupMemberOpenID = d.GroupMemberOID
-		if d.Data != nil && d.Data.Resolved != nil {
-			ev.Interaction = d.Data.Resolved.model()
-			ev.InteractionUserID = qqtypes.FirstNonEmpty(d.Data.Resolved.UserID, d.GroupMemberOID, d.UserOpenID)
-		} else {
-			ev.InteractionUserID = qqtypes.FirstNonEmpty(d.GroupMemberOID, d.UserOpenID)
-		}
+		fillInteraction(ev, d, env.ID)
 	}
 
 	ev.TargetID = d.targetID(ev.Scene)
 	ev.GroupID = d.GroupID
 	ev.UnionGroupOpenID = d.UnionGroupOpenID
-	ev.Sender = d.Author.sender(ev.Scene)
-	switch ev.Type {
-	case GroupAddRobot, GroupDelRobot, GroupMsgReject:
-		// 这些事件体只有 op_member_openid（操作成员），author 缺失。
-		if id := d.OpMemberOpenID; id != "" {
-			ev.Sender = Sender{ID: id}
-		}
-	}
-	// FRIEND_ADD/DEL 的 openid 在顶层 d.openid；GROUP_MEMBER_ADD/REMOVE、GROUP_JOIN_REQUEST
-	// 的成员 openid 在 d.member_openid；INTERACTION_CREATE 没有 author。
-	if ev.Sender.ID == "" {
-		ev.Sender.ID = qqtypes.FirstNonEmpty(d.OpenID, d.MemberOpenID, d.GroupMemberOID, d.UserOpenID)
-	}
+	ev.Sender = resolveSender(d, ev)
 	if ev.TargetID == "" && ev.Scene == SceneC2C {
 		ev.TargetID = d.OpenID
 	}
@@ -138,6 +92,87 @@ func ParseEnvelope(env *Envelope) (*Event, error) {
 		ev.Timestamp = ts
 	}
 
+	fillTypeSpecific(ev, d)
+	return ev, nil
+}
+
+// decodeEventData 解出 d 字段并拦下"空事件体"：
+// "d":null / "d":{} / 空 d 对消息事件同样解码成功，但会产出空壳幽灵事件（业务回复必然失败，
+// 且错误被推迟到发送阶段才发现）。只拦"完全空"，不逐字段校验（平台会按场景省略字段）。
+func decodeEventData(env *Envelope) (dispatchData, error) {
+	var d dispatchData
+	if env.T == "" {
+		return d, fmt.Errorf("event: missing event type (t)")
+	}
+	if len(env.D) > 0 {
+		if err := json.Unmarshal(env.D, &d); err != nil {
+			// 消息类事件 d 坏了必须报错；控制事件容忍（RESUMED 等的 d 是字符串/空）。
+			if IsMessageType(Type(env.T)) {
+				return d, fmt.Errorf("event: decode %s payload: %w", env.T, err)
+			}
+		}
+	}
+	if IsMessageType(Type(env.T)) && isEmptyPayload(env.D) {
+		return d, fmt.Errorf("event: %s 的事件体为空（d 缺失/null/{}）", env.T)
+	}
+	return d, nil
+}
+
+// isEmptyPayload 判断 d 是否"完全空"：缺失、null，或压掉空白后没有任何字段的对象。
+func isEmptyPayload(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return true
+	}
+	var compacted bytes.Buffer
+	if err := json.Compact(&compacted, trimmed); err != nil {
+		return false // 非法 JSON 由 decodeEventData 的解码分支报错
+	}
+	return compacted.String() == "{}"
+}
+
+// fillInteraction 填互动事件专有字段：interaction_id、类型、场景与操作者。
+func fillInteraction(ev *Event, d dispatchData, envID string) {
+	// 官方注明 interaction_id 不带 "INTERACTION_CREATE:" 前缀；历史事件出现过带前缀形态，防御性剥掉。
+	ev.InteractionID = strings.TrimPrefix(qqtypes.FirstNonEmpty(d.ID, envID), "INTERACTION_CREATE:")
+	ev.InteractionType = d.InteractionType
+	if s := sceneFromString(d.sceneValue()); s != 0 {
+		ev.Scene = s
+	} else if d.ChatType == 1 {
+		ev.Scene = SceneGroup
+	} else if d.ChatType == 2 {
+		ev.Scene = SceneC2C
+	}
+	ev.GroupMemberOpenID = d.GroupMemberOID
+	if d.Data != nil && d.Data.Resolved != nil {
+		ev.Interaction = d.Data.Resolved.model()
+		ev.InteractionUserID = qqtypes.FirstNonEmpty(d.Data.Resolved.UserID, d.GroupMemberOID, d.UserOpenID)
+		return
+	}
+	ev.InteractionUserID = qqtypes.FirstNonEmpty(d.GroupMemberOID, d.UserOpenID)
+}
+
+// resolveSender 定发送者：author 优先，操作类事件取 op_member_openid，
+// 都没有时按各事件的顶层 openid 兜底。
+func resolveSender(d dispatchData, ev *Event) Sender {
+	sender := d.Author.sender(ev.Scene)
+	switch ev.Type {
+	case GroupAddRobot, GroupDelRobot, GroupMsgReject:
+		// 这些事件体只有 op_member_openid（操作成员），author 缺失。
+		if id := d.OpMemberOpenID; id != "" {
+			return Sender{ID: id}
+		}
+	}
+	// FRIEND_ADD/DEL 的 openid 在顶层 d.openid；GROUP_MEMBER_ADD/REMOVE、GROUP_JOIN_REQUEST
+	// 的成员 openid 在 d.member_openid；INTERACTION_CREATE 没有 author。
+	if sender.ID == "" {
+		sender.ID = qqtypes.FirstNonEmpty(d.OpenID, d.MemberOpenID, d.GroupMemberOID, d.UserOpenID)
+	}
+	return sender
+}
+
+// fillTypeSpecific 填各事件独占的字段（字段不同、互不影响）。
+func fillTypeSpecific(ev *Event, d dispatchData) {
 	switch ev.Type {
 	case FriendAdd:
 		ev.FriendScene = d.sceneValue()
@@ -151,7 +186,6 @@ func ParseEnvelope(env *Envelope) (*Event, error) {
 		ev.ChatType = d.ChatType
 		ev.ApplicationID = d.ApplicationID
 	}
-	return ev, nil
 }
 
 // dispatchData 是 d 字段的并集（不同事件类型字段不同，缺的字段自然为零值）。
