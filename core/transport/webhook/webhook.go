@@ -40,6 +40,11 @@ const (
 	queueSize = 256
 	// defaultOnEventTimeout 是单条事件处理的默认超时。
 	defaultOnEventTimeout = 30 * time.Second
+
+	// 丢弃原因（日志与 OnDrop 归因共用同一套字面量）。
+	dropReasonClosed     = "closed"
+	dropReasonQueueFull  = "queue_full"
+	dropReasonParseError = "parse_error"
 )
 
 // EventMeta 是去重所需的最少元数据（ID 用最外层 id，不是 d.id）。
@@ -189,7 +194,7 @@ func (h *Handler) DroppedByType() map[string]int64 {
 	return out
 }
 
-// ServeHTTP 实现 http.Handler。
+// ServeHTTP 实现 http.Handler：只做入口编排（关闭态/方法/限读/解信封/按 op 分流）。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
 	closed := h.closed
@@ -223,7 +228,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unsupported op", http.StatusBadRequest)
 		return
 	}
+	h.handleEvent(w, r, body, env)
+}
 
+// handleEvent 处理 op0 回调：验签 → appid → 入队 → ACK（入队成功才 ACK）。
+func (h *Handler) handleEvent(w http.ResponseWriter, r *http.Request, body []byte, env event.Envelope) {
 	if err := h.verify(r.Header.Get(SignatureHeader), r.Header.Get(TimestampHeader), body); err != nil {
 		h.log.Warn("webhook 验签失败", "err", err)
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
@@ -240,7 +249,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 入队成功才 ACK：队列满时回 503，让平台按重推策略重投。
 	// 去重放在 worker 里做（见 handleBody）。
-	if !h.dispatch(queuedEvent{env: env, raw: body}) {
+	item := queuedEvent{env: env, raw: body}
+	if reason := h.dispatch(item); reason != "" {
+		// 记账与 OnDrop 必须在锁外做。
+		h.recordDrop(item, reason)
 		http.Error(w, "busy", http.StatusServiceUnavailable)
 		return
 	}
@@ -348,25 +360,25 @@ func (h *Handler) rejectChallenge(w http.ResponseWriter, reason string) {
 	http.Error(w, "invalid challenge", http.StatusBadRequest)
 }
 
-// dispatch 把事件放入异步队列；队列满或已关闭返回 false（调用方回 503 让平台重推）。
-func (h *Handler) dispatch(item queuedEvent) bool {
+// dispatch 把事件放入异步队列，返回空 reason 表示入队成功。
+// 失败原因由调用方在锁外记账（recordDrop 会调用户 OnDrop，持锁执行会拖住 Close）。
+func (h *Handler) dispatch(item queuedEvent) (reason string) {
 	// RLock 与 Close 互斥，避免向已关闭的队列发送。
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	if h.closed {
-		h.recordDrop(item, "closed")
-		return false
+		return dropReasonClosed
 	}
 	select {
 	case h.queue <- item:
-		return true
+		return ""
 	default:
-		h.recordDrop(item, "queue_full")
-		return false
+		return dropReasonQueueFull
 	}
 }
 
 // recordDrop 统一记账：计数 + 按类型分桶 + 日志 + OnDrop（队列满/已关闭共用）。
+// 必须在 h.mu 之外调用：OnDrop 是用户代码，阻塞时不得拖住 Close/ServeHTTP 的锁。
 func (h *Handler) recordDrop(item queuedEvent, reason string) {
 	h.dropped.Add(1)
 	meta := EventMeta{Raw: item.raw, ID: item.env.ID, Type: item.env.T}
@@ -401,7 +413,7 @@ func (h *Handler) handleBody(item queuedEvent) {
 	ev, err := event.ParseEnvelope(&item.env)
 	if err != nil {
 		// 解析失败走与队列丢弃相同的 OnDrop 通道。
-		h.recordDrop(item, "parse_error")
+		h.recordDrop(item, dropReasonParseError)
 		h.log.Warn("webhook 事件解析失败（ACK 已发，不可恢复）", "err", err, "event_id", item.env.ID)
 		return
 	}
