@@ -29,60 +29,71 @@ func (c *Client) buildIngress() error {
 	case "":
 		return nil // 兼容旧用法：由宿主提供 Transport（或纯 REST）
 	case ModeWS:
-		opts := ws.Options{}
-		if c.cfg.WSOptions != nil {
-			opts = *c.cfg.WSOptions // 值拷贝：不把门面回填写回调用方的结构体
-		}
-		opts.AppID = qqtypes.FirstNonEmpty(opts.AppID, c.cfg.AppID)
-		// Token 硬覆盖：WS 鉴权必须复用 REST 的 token 缓存与 401 换票（Validate 已禁止用户自设）。
-		opts.Token = c.api.Token
-		// 代理/自定义 CA 必须与 REST 共用。
-		if opts.HTTP == nil {
-			opts.HTTP = c.cfg.HTTP
-		}
-		if opts.SessionStore == nil {
-			// 未注入时使用内存 SessionStore；断线窗口内的事件仅靠 Resume 补发。
-			opts.SessionStore = ws.NewMemorySession()
-		}
-		if opts.Logger == nil {
-			opts.Logger = loggerOrDiscard(c.cfg.Logger)
-		}
-		tr, err := ws.New(opts)
-		if err != nil {
-			return fmt.Errorf("qqbot: 构造 ws 通道: %w", err)
-		}
-		c.cfg.Transport = tr
-		return nil
+		return c.buildWS()
 	case ModeWebhook:
-		opts := webhook.Options{}
-		if c.cfg.WebhookOptions != nil {
-			opts = *c.cfg.WebhookOptions
-		}
-		opts.Secret = qqtypes.FirstNonEmpty(opts.Secret, c.cfg.AppSecret)
-		opts.AppID = qqtypes.FirstNonEmpty(opts.AppID, c.cfg.AppID)
-		if opts.Logger == nil {
-			opts.Logger = loggerOrDiscard(c.cfg.Logger)
-		}
-		// OnEvent 由门面独占：Validate 已禁止宿主自行设置。
-		opts.OnEvent = func(ctx context.Context, ev *event.Event) {
-			// stop 优先判定：Close 后残留事件直接放弃。
-			select {
-			case <-c.stop:
-				return
-			default:
-			}
-			// ctx 由 OnEventTimeout 控制。
-			c.deliver(ev, ctx.Done())
-		}
-		h, err := webhook.New(opts)
-		if err != nil {
-			return fmt.Errorf("qqbot: 构造 webhook 通道: %w", err)
-		}
-		c.wh = h
-		return nil
+		return c.buildWebhook()
 	default:
 		return fmt.Errorf("qqbot: 未知 Mode %q", c.cfg.Mode)
 	}
+}
+
+// buildWS 装配 ws 通道：把门面持有的凭证/HTTP/日志回填进选项，再交给 ws.New。
+func (c *Client) buildWS() error {
+	opts := ws.Options{}
+	if c.cfg.WSOptions != nil {
+		opts = *c.cfg.WSOptions // 值拷贝：不把门面回填写回调用方的结构体
+	}
+	opts.AppID = qqtypes.FirstNonEmpty(opts.AppID, c.cfg.AppID)
+	// Token 硬覆盖：WS 鉴权必须复用 REST 的 token 缓存与 401 换票（Validate 已禁止用户自设）。
+	opts.Token = c.api.Token
+	// 代理/自定义 CA 必须与 REST 共用。
+	if opts.HTTP == nil {
+		opts.HTTP = c.cfg.HTTP
+	}
+	if opts.SessionStore == nil {
+		// 未注入时使用内存 SessionStore；断线窗口内的事件仅靠 Resume 补发。
+		opts.SessionStore = ws.NewMemorySession()
+	}
+	if opts.Logger == nil {
+		opts.Logger = loggerOrDiscard(c.cfg.Logger)
+	}
+	tr, err := ws.New(opts)
+	if err != nil {
+		return fmt.Errorf("qqbot: 构造 ws 通道: %w", err)
+	}
+	c.cfg.Transport = tr
+	return nil
+}
+
+// buildWebhook 装配 webhook 通道：OnEvent 由门面独占（Validate 已禁止宿主自行设置）。
+func (c *Client) buildWebhook() error {
+	opts := webhook.Options{}
+	if c.cfg.WebhookOptions != nil {
+		opts = *c.cfg.WebhookOptions
+	}
+	opts.Secret = qqtypes.FirstNonEmpty(opts.Secret, c.cfg.AppSecret)
+	opts.AppID = qqtypes.FirstNonEmpty(opts.AppID, c.cfg.AppID)
+	if opts.Logger == nil {
+		opts.Logger = loggerOrDiscard(c.cfg.Logger)
+	}
+	opts.OnEvent = c.onWebhookEvent
+	h, err := webhook.New(opts)
+	if err != nil {
+		return fmt.Errorf("qqbot: 构造 webhook 通道: %w", err)
+	}
+	c.wh = h
+	return nil
+}
+
+// onWebhookEvent 是门面独占的 OnEvent：stop 优先判定，ctx 由 OnEventTimeout 控制。
+func (c *Client) onWebhookEvent(ctx context.Context, ev *event.Event) {
+	// stop 优先判定：Close 后残留事件直接放弃。
+	select {
+	case <-c.stop:
+		return
+	default:
+	}
+	c.deliver(ev, ctx.Done())
 }
 
 // deliver 把事件投递到 Events()。cancel 非 nil 时它关闭就放弃（ws 的 runCtx）；
