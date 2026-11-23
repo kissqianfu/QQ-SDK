@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/kissqianfu/QQ-SDK/common/apierr"
+	"github.com/kissqianfu/QQ-SDK/common/qqtypes"
 	"github.com/kissqianfu/QQ-SDK/common/token"
 	"github.com/kissqianfu/QQ-SDK/common/version"
 )
@@ -68,7 +69,7 @@ func (c *Client) runWithRetry(ctx context.Context, fn func(attempt int) (retryab
 				// 服务器明确给了等待时长就精确遵守，不加抖动。
 				delay = retryAfter
 			} else {
-				// 自己的指数退避加 0~20% 抖动。
+				// 自己的线性退避加 0~20% 抖动。
 				delay = withJitter(delay)
 			}
 			if err := c.sleepCtx(ctx, delay); err != nil {
@@ -89,7 +90,7 @@ func (c *Client) runWithRetry(ctx context.Context, fn func(attempt int) (retryab
 			return err
 		}
 		if c.log != nil {
-			c.log.Warn("qqbot api request failed", "attempt", attempt, "err", err)
+			c.log.Warn("qqbot api 请求失败", "attempt", attempt, "err", err)
 		}
 	}
 	return lastErr
@@ -108,7 +109,7 @@ func withJitter(d time.Duration) time.Duration {
 }
 
 // do 发一次带重试的请求：429/网络错误总是重试；5xx 仅对幂等方法重试。
-// 401 时若 token 存储实现 token.Deleter，则失效缓存换新 token 重试一次。
+// 401 单独处理：token 可能已失效，换新 token 后重来一轮（不占普通重试的预算）。
 func (c *Client) do(ctx context.Context, method, url, tok string, body any) ([]byte, error) {
 	var payload []byte
 	if body != nil {
@@ -119,9 +120,21 @@ func (c *Client) do(ctx context.Context, method, url, tok string, body any) ([]b
 		payload = encoded
 	}
 
+	result, err := c.sendWithRetry(ctx, method, url, tok, payload)
+	// 401 说明请求未被处理：换票后独立重来，与重试上限解耦
+	// （否则调用方把 MaxAttempts 设成 1 就会静默失去「401 重取一次」）。
+	if err != nil && tok != "" && isUnauthorized(err) {
+		if newTok, ok := c.reauth(ctx); ok {
+			return c.sendWithRetry(ctx, method, url, newTok, payload)
+		}
+	}
+	return result, err
+}
+
+// sendWithRetry 是「一轮」重试：同一 token 下按幂等性重发，不含换票。
+func (c *Client) sendWithRetry(ctx context.Context, method, url, tok string, payload []byte) ([]byte, error) {
 	idempotent := idempotentMethod(method)
 	var result []byte
-	authRetried := false
 	err := c.runWithRetry(ctx, func(int) (bool, time.Duration, error) {
 		raw, err := c.once(ctx, method, url, tok, payload)
 		if err != nil {
@@ -134,23 +147,6 @@ func (c *Client) do(ctx context.Context, method, url, tok string, body any) ([]b
 				return false, 0, err
 			}
 			return true, 0, err
-		}
-		// 401：token 可能已失效，失效缓存后换新 token 重试一次。
-		if raw.status == http.StatusUnauthorized && tok != "" && !authRetried {
-			authRetried = true
-			if d, ok := c.tokens.(token.Deleter); ok {
-				if derr := d.Delete(ctx); derr != nil && c.log != nil {
-					c.log.Warn("qqbot api token 失效失败", "err", derr)
-				}
-				if newTok, terr := c.Token(ctx); terr == nil {
-					tok = newTok
-					return true, 0, parseAPIError(raw.body, raw.status)
-				} else if c.log != nil {
-					// 重取 token 失败时记录根因。
-					c.log.Warn("qqbot api 401 后重取 token 失败，按 401 处理", "err", terr)
-				}
-			}
-			return false, 0, parseAPIError(raw.body, raw.status)
 		}
 		if isRetryableStatus(raw.status) {
 			// 非幂等请求（发消息等）不自动重发；需要时显式开 RetryNonIdempotent。
@@ -169,6 +165,31 @@ func (c *Client) do(ctx context.Context, method, url, tok string, body any) ([]b
 		return nil, err
 	}
 	return result, nil
+}
+
+// reauth 失效 token 缓存并换新 token；返回 false 表示换不到（调用方按原错误返回）。
+func (c *Client) reauth(ctx context.Context) (string, bool) {
+	d, ok := c.tokens.(token.Deleter)
+	if !ok {
+		return "", false
+	}
+	if derr := d.Delete(ctx); derr != nil && c.log != nil {
+		c.log.Warn("qqbot api token 失效失败", "err", derr)
+	}
+	newTok, terr := c.Token(ctx)
+	if terr != nil {
+		if c.log != nil {
+			c.log.Warn("qqbot api 401 后重取 token 失败，按 401 处理", "err", terr)
+		}
+		return "", false
+	}
+	return newTok, true
+}
+
+// isUnauthorized 判定错误是否来自平台 401（token 失效/未鉴权）。
+func isUnauthorized(err error) bool {
+	var ae *apierr.APIError
+	return errors.As(err, &ae) && ae.HTTP == http.StatusUnauthorized
 }
 
 // idempotentMethod 判断 HTTP 方法是否幂等（可安全重发）。
@@ -200,7 +221,7 @@ func (c *Client) once(ctx context.Context, method, url, tok string, payload []by
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Content-Type", "application/json")
 	if tok != "" {
-		req.Header.Set("Authorization", "QQBot "+tok)
+		req.Header.Set("Authorization", qqtypes.AuthPrefix+tok)
 	}
 
 	resp, err := c.http.Do(req)

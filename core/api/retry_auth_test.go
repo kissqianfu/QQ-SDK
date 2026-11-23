@@ -73,6 +73,48 @@ func TestPost5xxRetriedWhenOptedIn(t *testing.T) {
 	}
 }
 
+// 401 换票与普通重试预算解耦：MaxAttempts=1 也必须保留「401 重取一次」。
+func TestUnauthorizedRetriesEvenWithSingleAttempt(t *testing.T) {
+	var msgCalls int32
+	var tokenCalls int32
+	srv := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app/getAppAccessToken":
+			n := atomic.AddInt32(&tokenCalls, 1)
+			tok := "t1"
+			if n > 1 {
+				tok = "t2"
+			}
+			writeJSON(w, 200, `{"access_token":"`+tok+`","expires_in":7200}`)
+		default:
+			atomic.AddInt32(&msgCalls, 1)
+			if r.Header.Get("Authorization") != "QQBot t2" {
+				writeJSON(w, 401, `{"err_code":11244,"message":"token invalid"}`)
+				return
+			}
+			writeJSON(w, 200, `{"id":"m1"}`)
+		}
+	})
+	c, err := New(Config{
+		AppID: "app", AppSecret: "secret",
+		BaseURL:  srv.URL,
+		TokenURL: srv.URL + "/app/getAppAccessToken",
+		Tokens:   token.NewMemory(),
+		Sleep:    func(time.Duration) {},
+		Retry:    &RetryConfig{MaxAttempts: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Send(context.Background(), Target{Scene: event.SceneGroup, ID: "g1"},
+		send.Text("hi").ReplyTo("msg-1", 1)); err != nil {
+		t.Fatalf("Send() error = %v（401 换票不应受 MaxAttempts 限制）", err)
+	}
+	if got := atomic.LoadInt32(&msgCalls); got != 2 {
+		t.Fatalf("业务请求 %d 次, want 2", got)
+	}
+}
+
 // 非幂等 POST 遇 429 默认不重发：平台没有"必然未处理"的契约，重发会造成重复消息。
 func TestPost429NotRetriedByDefault(t *testing.T) {
 	var attempts int32

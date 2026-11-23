@@ -53,7 +53,9 @@ type StreamFrame struct {
 // StreamReply 是一条进行中的单聊流式消息（LLM delta 流 → 打字机效果）。
 // 同一时间只允许一个 goroutine 驱动一条流。
 type StreamReply struct {
-	mu sync.Mutex
+	// sendMu 让帧串行（保顺序与 index 单调），且在网络请求期间不被 s.mu 挡住只读方法。
+	sendMu sync.Mutex
+	mu     sync.Mutex
 
 	c      *Client
 	userID string
@@ -142,12 +144,40 @@ func (s *StreamReply) ID() string {
 	return s.id
 }
 
-// frame 发送一帧并推进句柄状态。
+// frame 发送一帧并推进句柄状态：sendMu 串行化帧，s.mu 只用于读写状态，
+// 网络请求在所有锁之外，慢请求不会卡住 ID()/Done()。
 func (s *StreamReply) frame(ctx context.Context, state int, mode, content string) (*StreamFrame, error) {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+
+	body, index, err := s.frameBody(state, mode, content)
+	if err != nil {
+		return nil, err
+	}
+	path, err := scenePath(event.SceneC2C, s.userID, "/stream_messages")
+	if err != nil {
+		return nil, err
+	}
+	raw, err := s.c.doPath(ctx, http.MethodPost, path, body)
+	if err != nil {
+		return nil, fmt.Errorf("api: stream frame %d: %w", index, err)
+	}
+	res, err := parseSendResult(raw)
+	if err != nil {
+		return nil, err
+	}
+	if res.ID == "" {
+		return nil, fmt.Errorf("api: 流式响应缺少 stream_msg_id")
+	}
+	return s.applyFrame(res, state, mode, content), nil
+}
+
+// frameBody 组这一帧的请求体并取出当前 index（持锁极短，纯内存）。
+func (s *StreamReply) frameBody(state int, mode, content string) (map[string]any, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.done {
-		return nil, errors.New("api: 流式消息已结束")
+		return nil, 0, errors.New("api: 流式消息已结束")
 	}
 	body := map[string]any{
 		"input_mode":   mode,
@@ -170,27 +200,13 @@ func (s *StreamReply) frame(ctx context.Context, state int, mode, content string
 	if s.cfg.IsWakeup {
 		body["is_wakeup"] = true
 	}
+	return body, s.index, nil
+}
 
-	path, err := scenePath(event.SceneC2C, s.userID, "/stream_messages")
-	if err != nil {
-		return nil, err
-	}
-	raw, err := s.c.doPath(ctx, http.MethodPost, path, body)
-	if err != nil {
-		return nil, fmt.Errorf("api: stream frame %d: %w", s.index, err)
-	}
-	res, err := parseSendResult(raw)
-	if err != nil {
-		return nil, err
-	}
-	if res.ID == "" {
-		return nil, fmt.Errorf("api: 流式响应缺少 stream_msg_id")
-	}
-	remain := 0
-	if res.RemainMsgLen != nil {
-		remain = *res.RemainMsgLen
-	}
-
+// applyFrame 用响应推进状态机：id、index、已下发全文、done。
+func (s *StreamReply) applyFrame(res *Result, state int, mode, content string) *StreamFrame {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.id = res.ID
 	s.index++
 	switch mode {
@@ -201,10 +217,14 @@ func (s *StreamReply) frame(ctx context.Context, state int, mode, content string
 		s.sent.WriteString(content)
 	}
 	s.done = state == streamStateDone
+	remain := 0
+	if res.RemainMsgLen != nil {
+		remain = *res.RemainMsgLen
+	}
 	return &StreamFrame{
 		ID:           res.ID,
 		Timestamp:    res.Timestamp,
 		RefIdx:       res.RefIdx,
 		RemainMsgLen: remain,
-	}, nil
+	}
 }

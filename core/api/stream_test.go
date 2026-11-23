@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +38,64 @@ func TestStreamAnchorValidation(t *testing.T) {
 		StreamConfig{MsgID: "m1", EventID: "e1"})
 	if err == nil {
 		t.Fatal("StartStream(msg_id+event_id) error = nil, want 二选一错误")
+	}
+}
+
+// 发帧期间不得持有状态锁：慢请求不能把 ID() 一起堵住
+// （旧实现整段 HTTP 都在 s.mu 里，ID()/Done() 要等到请求返回）。
+func TestStreamFrameReleasesLockDuringRequest(t *testing.T) {
+	var block atomic.Bool
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var frames int32
+
+	srv := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/users/u1/stream_messages" {
+			http.NotFound(w, r)
+			return
+		}
+		if atomic.AddInt32(&frames, 1) > 1 && block.Load() {
+			enterOnce(entered)
+			<-release
+		}
+		writeJSON(w, 200, `{"id":"stream-1","timestamp":"2026-07-21T10:00:00+08:00","remain_msg_len":100}`)
+	})
+	c := newClient(t, srv, seededToken(t))
+	st, err := c.StartStream(context.Background(), Target{Scene: event.SceneC2C, ID: "u1"}, "a", StreamConfig{})
+	if err != nil {
+		t.Fatalf("StartStream() error = %v", err)
+	}
+
+	block.Store(true)
+	sendDone := make(chan struct{})
+	go func() {
+		defer close(sendDone)
+		_, _ = st.AppendDelta(context.Background(), "b")
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("第二帧请求未到达服务端")
+	}
+	idDone := make(chan string, 1)
+	go func() { idDone <- st.ID() }()
+	select {
+	case got := <-idDone:
+		if got != "stream-1" {
+			t.Fatalf("ID = %q, want stream-1", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("发帧请求期间 ID() 被阻塞：状态锁被网络 IO 持有")
+	}
+	close(release)
+	<-sendDone
+}
+
+// enterOnce 非阻塞地通知一次（重复调用不阻塞）。
+func enterOnce(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
 	}
 }
 

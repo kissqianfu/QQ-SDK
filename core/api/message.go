@@ -256,15 +256,8 @@ func keyboardBody(kb send.Keyboard) map[string]any {
 	for _, row := range kb.Rows {
 		buttons := make([]map[string]any, 0, len(row))
 		for _, btn := range row {
-			// 官方 permission 语义：0=指定用户 1=管理员 2=所有人 3=指定身份组；
-			// 零值 0 表示"自动"：有指定对象时用 0，否则 2。
-			permType := 2
-			if len(btn.SpecifyUserIDs) > 0 || len(btn.SpecifyRoleIDs) > 0 {
-				permType = 0
-			}
-			if btn.PermissionType == 1 || btn.PermissionType == 2 || btn.PermissionType == 3 {
-				permType = btn.PermissionType
-			}
+			// permission.type 的推断规则由 send 包定义（Validate 与序列化共用一份）。
+			permType := btn.PermissionTypeFor()
 			permission := map[string]any{"type": permType}
 			if permType == 0 {
 				if len(btn.SpecifyUserIDs) > 0 {

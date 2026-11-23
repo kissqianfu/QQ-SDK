@@ -77,6 +77,20 @@ type Button struct {
 	PermissionType int
 }
 
+// PermissionTypeFor 返回按钮实际下发的官方 permission.type（0~3）：
+// 显式设置 1/2/3 优先；0 表示"自动推断"——有指定用户/身份组时用 0，否则用 2（所有人）。
+// 这条规则只在这里定义，序列化侧直接调用，避免两处各写一遍而漂移。
+func (b Button) PermissionTypeFor() int {
+	switch b.PermissionType {
+	case 1, 2, 3:
+		return b.PermissionType
+	}
+	if len(b.SpecifyUserIDs) > 0 || len(b.SpecifyRoleIDs) > 0 {
+		return 0
+	}
+	return 2
+}
+
 // Modal 是按钮点击的二次确认框（content ≤40 且无 URL；confirm/cancel ≤4 字符）。
 type Modal struct {
 	Content     string

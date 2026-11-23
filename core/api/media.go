@@ -164,27 +164,8 @@ func (c *Client) uploadMediaDetail(ctx context.Context, scene event.Scene, targe
 
 // UploadPrepare 申请分片上传，返回 upload_id、分片大小与各分片预签名 URL。
 func (c *Client) UploadPrepare(ctx context.Context, scene event.Scene, targetID string, req UploadPrepareRequest) (*UploadPrepareResult, error) {
-	if req.FileName == "" {
-		return nil, fmt.Errorf("api: upload file_name 不能为空")
-	}
-	if err := validateFileType(req.FileType); err != nil {
+	if err := validatePrepare(req); err != nil {
 		return nil, err
-	}
-	// 官方 prepare 要求三个校验和全部提供（md5 / sha1 / md5_10m，均为 16 进制串）。
-	if err := validateDigest("md5", req.MD5); err != nil {
-		return nil, err
-	}
-	if err := validateDigest("sha1", req.SHA1); err != nil {
-		return nil, err
-	}
-	if err := validateDigest("md5_10m", req.MD5TenM); err != nil {
-		return nil, err
-	}
-	if req.FileSize <= 0 {
-		return nil, fmt.Errorf("api: upload file_size 必须 > 0")
-	}
-	if req.FileSize > maxUploadBytes {
-		return nil, fmt.Errorf("api: upload 文件超过平台硬限制 %d 字节", int64(maxUploadBytes))
 	}
 	path, err := scenePath(scene, targetID, "/upload_prepare")
 	if err != nil {
@@ -201,6 +182,38 @@ func (c *Client) UploadPrepare(ctx context.Context, scene event.Scene, targetID 
 	if err != nil {
 		return nil, err
 	}
+	return decodePrepare(raw)
+}
+
+// validatePrepare 校验 prepare 入参（纯计算，不打平台）。
+func validatePrepare(req UploadPrepareRequest) error {
+	if req.FileName == "" {
+		return fmt.Errorf("api: upload file_name 不能为空")
+	}
+	if err := validateFileType(req.FileType); err != nil {
+		return err
+	}
+	// 官方 prepare 要求三个校验和全部提供（md5 / sha1 / md5_10m，均为 16 进制串）。
+	for _, sum := range []struct{ field, digest string }{
+		{"md5", req.MD5},
+		{"sha1", req.SHA1},
+		{"md5_10m", req.MD5TenM},
+	} {
+		if err := validateDigest(sum.field, sum.digest); err != nil {
+			return err
+		}
+	}
+	if req.FileSize <= 0 {
+		return fmt.Errorf("api: upload file_size 必须 > 0")
+	}
+	if req.FileSize > maxUploadBytes {
+		return fmt.Errorf("api: upload 文件超过平台硬限制 %d 字节", int64(maxUploadBytes))
+	}
+	return nil
+}
+
+// decodePrepare 把 prepare 响应归一成结果：字符串尺寸转字节、分片按 index 排序。
+func decodePrepare(raw []byte) (*UploadPrepareResult, error) {
 	var resp struct {
 		UploadID   string `json:"upload_id"`
 		BlockSize  string `json:"block_size"`
@@ -217,6 +230,7 @@ func (c *Client) UploadPrepare(ctx context.Context, scene event.Scene, targetID 
 		return nil, fmt.Errorf("api: decode upload prepare: %w", err)
 	}
 	result := &UploadPrepareResult{UploadID: resp.UploadID, Concurrency: resp.UploadConf.Concurrency}
+	var err error
 	if result.BlockSize, err = parseUploadSize(resp.BlockSize); err != nil {
 		return nil, fmt.Errorf("api: upload prepare block_size: %w", err)
 	}
