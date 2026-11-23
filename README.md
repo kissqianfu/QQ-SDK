@@ -10,7 +10,7 @@ QQ 官方机器人接入层 SDK（Go）：零业务依赖、可整体拆卸替�
 |---|---|
 | 通道 | WebSocket（心跳判活 / 自动重连 / 关闭码三分类）、Webhook（`WebhookHTTPHandler` 交给业务路由）、自备 `Transport` |
 | 鉴权 | `access_token` 自动获取与刷新（提前 90s、串行、401 重取一次） |
-| 重试 | 幂等请求 5xx/429 遵守 `Retry-After` 指数退避；非幂等 POST（发消息）默认不自动重发，避免重复投递（可配 `RetryNonIdempotent`） |
+| 重试 | 幂等请求 5xx/429 遵守 `Retry-After`，否则线性退避（`base×(n-1)` + 0~20% 抖动）；非幂等 POST（发消息）默认不自动重发，避免重复投递（可配 `RetryNonIdempotent`） |
 | 配额 | 三层本地拦截：群 60 QPM / 单聊 10 QPS / 单关系 20 QPM，另加每目标每日 1000 条 |
 | 错误 | `apierr.APIError` 按官方 `err_code` 解析，判定 `IsDuplicate / IsExpired / IsAnchorRejected / IsAuth / IsRateLimited` |
 
@@ -51,6 +51,9 @@ QQ 官方机器人接入层 SDK（Go）：零业务依赖、可整体拆卸替�
 ```bash
 go get github.com/kissqianfu/QQ-SDK
 ```
+
+构建工具链要求 **Go ≥ 1.27.4**：`GO-2026-6859`（1.27.3 及之前 stdlib `net/http.MaxBytesReader` 头部竞态，
+可打崩 HTTP/1 server）只在标准库侧修复，webhook 回调路径会用到该方法，SDK 代码层无法规避。
 
 ## 版本
 

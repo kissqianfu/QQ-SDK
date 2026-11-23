@@ -22,6 +22,9 @@ type User struct {
 	WelcomeMsg string `json:"welcome_msg"`
 }
 
+// AuthPrefix 是 Authorization 头与 WS Identify/Resume token 的固定前缀（官方协议要求）。
+const AuthPrefix = "QQBot "
+
 // timeMilliThreshold 是"Unix 秒 vs 毫秒"启发式分界（>1e12 只可能是毫秒）。
 const timeMilliThreshold = 1_000_000_000_000
 

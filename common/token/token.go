@@ -1,6 +1,6 @@
 // Package token 提供 access_token 的存取契约与默认内存实现。
 //
-// 刷新逻辑（提前 90s、失败重试、串行）在 api 层内部；业务只负责存取。
+// 刷新逻辑（提前 90s、串行、失败即返回不重试）在 api 层内部；业务只负责存取。
 package token
 
 import (
