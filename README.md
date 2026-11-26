@@ -114,5 +114,5 @@ if h := c.WebhookHTTPHandler(); h != nil {
 go build ./... && go vet ./... && go test -race ./...
 ```
 
-CI 另跑 `gofmt` / `staticcheck` / `govulncheck`，工具链固定 `1.27.4`（见 `.github/workflows/ci.yml`）；
-本机低于该版本时 `govulncheck` 会报上文的 `GO-2026-6859`，属工具链问题、非 SDK 代码问题。
+建议本地再跑 `gofmt -l .`（应无输出）、`staticcheck ./...` 与 `govulncheck ./...`。
+本机低于 `1.27.4` 时 `govulncheck` 会报上文的 `GO-2026-6859`，属工具链问题、非 SDK 代码问题。
