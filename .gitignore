@@ -16,3 +16,7 @@ Thumbs.db
 
 # 日志
 *.log
+
+# AI 协作状态与工程规范（本地维护，不进仓库）
+docs/ai/
+docs/standards/
